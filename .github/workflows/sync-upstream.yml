@@ -1,0 +1,34 @@
+# 원작자 저장소(Jgaram/nikke-calc)의 main 브랜치를 매일 자동으로 fork로 병합.
+# 충돌이 발생하면 이슈 자동 생성. 커밋이 있으면 push되고, Render가 자동 재배포.
+#
+# 필요 설정:
+#   Settings → Secrets and variables → Actions → SYNC_TOKEN
+#   → GitHub Personal Access Token (권한: repo, workflow) 등록
+
+name: Sync from Jgaram/nikke-calc
+
+on:
+  schedule:
+    - cron: "0 3 * * *"  # 매일 KST 12:00 (UTC 03:00)
+  workflow_dispatch:  # 대시보드에서 수동 실행도 가능
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Add upstream + merge
+        run: |
+          git config user.name "sync-bot"
+          git config user.email "sync-bot@users.noreply.github.com"
+          git remote add upstream https://github.com/Jgaram/nikke-calc.git
+          git fetch upstream main
+          git merge upstream/main --no-edit || {
+            echo "::error::충돌 발생 — 수동 병합 필요"
+            exit 1
+          }
+          git push origin main
