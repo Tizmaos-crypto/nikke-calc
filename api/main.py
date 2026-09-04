@@ -3,6 +3,8 @@
 원본 CLI (`python -m runner.sim ...`)를 그대로 subprocess로 호출해서, 원작자가 옵션을
 추가/변경해도 API 스키마만 확장하면 계속 살아남는다.
 
+v2 변경: `profile_data` 필드 추가 — 요청마다 임시 프로필 파일을 만들어 `--profile`로 넘긴다.
+
 로컬 실행:
     uvicorn api.main:app --reload --port 8000
 
@@ -10,9 +12,12 @@ Render 배포는 render.yaml 참고.
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
+import uuid
+from pathlib import Path
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -20,6 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROFILE_DIR = Path(REPO_ROOT) / "profiles"
 DEFAULT_TIMEOUT = 60  # 시뮬 1회 상한(초)
 
 # CORS: React 앱 도메인만 허용. 배포 시 환경변수로 오버라이드.
@@ -30,7 +36,7 @@ ALLOWED_ORIGINS = [
     ).split(",") if o.strip()
 ]
 
-app = FastAPI(title="nikke-calc API", version="0.1.0")
+app = FastAPI(title="nikke-calc API", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -59,7 +65,9 @@ class SimRequest(BaseModel):
     camera: Optional[str] = None
     camera_mode: Optional[str] = None
     control_mode: Optional[str] = None
-    profile: Optional[str] = None
+    profile: Optional[str] = None                       # 서버에 미리 저장된 프로필 이름 (--profile <name>)
+    profile_data: Optional[dict] = Field(None,          # v2: 요청 시점에 프로필 dict 자체 전달
+        description="프로필 딕셔너리 (chars/_account/_meta). 있으면 임시 파일로 저장 후 --profile로 사용")
     profile_level: str = "fixed"
     # 반복 옵션 (CLI --tap, --click 등)
     tap: Optional[List[str]] = None
@@ -81,9 +89,10 @@ class SimResponse(BaseModel):
     stderr: str = ""
     returncode: int
     cmd: List[str]
+    profile_used: Optional[str] = None  # v2: 어떤 프로필 이름으로 돌았는지 (디버깅용)
 
 
-def _build_cmd(req: SimRequest) -> List[str]:
+def _build_cmd(req: SimRequest, profile_name_override: Optional[str] = None) -> List[str]:
     cmd = [sys.executable, "-m", "runner.sim", req.squad, "--view", req.view]
     if req.seed is not None:
         cmd += ["--seed", str(req.seed)]
@@ -115,8 +124,10 @@ def _build_cmd(req: SimRequest) -> List[str]:
         cmd += ["--camera-mode", req.camera_mode]
     if req.control_mode:
         cmd += ["--control-mode", req.control_mode]
-    if req.profile:
-        cmd += ["--profile", req.profile]
+    # v2: profile_data가 있으면 임시 프로필 이름 사용, 아니면 req.profile
+    profile_name = profile_name_override or req.profile
+    if profile_name:
+        cmd += ["--profile", profile_name]
     if req.profile_level != "fixed":
         cmd += ["--profile-level", req.profile_level]
     for c in (req.char or []):
@@ -148,47 +159,76 @@ def _build_cmd(req: SimRequest) -> List[str]:
     return cmd
 
 
+def _write_temp_profile(profile_data: dict) -> tuple[str, Path]:
+    """profile_data → profiles/req_<uuid>.json 임시 저장. (name, path) 반환."""
+    PROFILE_DIR.mkdir(exist_ok=True)
+    name = f"req_{uuid.uuid4().hex}"
+    path = PROFILE_DIR / f"{name}.json"
+    path.write_text(json.dumps(profile_data, ensure_ascii=False), encoding="utf-8")
+    return name, path
+
+
 @app.get("/")
 def root() -> dict:
     return {
         "name": "nikke-calc API",
+        "version": "0.2.0",
         "upstream": "https://github.com/Jgaram/nikke-calc",
         "license": "MIT (C) 2026 Jgaram",
         "endpoints": ["GET /health", "POST /simulate"],
+        "features": ["profile_data in request body (v0.2.0)"],
     }
 
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok"}
+    return {"status": "ok", "version": "0.2.0"}
 
 
 @app.post("/simulate", response_model=SimResponse)
 def simulate_endpoint(req: SimRequest) -> SimResponse:
-    cmd = _build_cmd(req)
+    # v2: profile_data 있으면 임시 파일 만들고, finally에서 삭제
+    temp_profile_name: Optional[str] = None
+    temp_profile_path: Optional[Path] = None
+    if req.profile_data:
+        try:
+            temp_profile_name, temp_profile_path = _write_temp_profile(req.profile_data)
+        except Exception as e:
+            raise HTTPException(500, f"프로필 임시 저장 실패: {e}")
+
     try:
-        result = subprocess.run(
-            cmd,
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=DEFAULT_TIMEOUT,
+        cmd = _build_cmd(req, profile_name_override=temp_profile_name)
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=DEFAULT_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(504, f"시뮬 시간 초과 ({DEFAULT_TIMEOUT}초)")
+        except FileNotFoundError as e:
+            raise HTTPException(500, f"Python 실행 파일 없음: {e}")
+
+        # returncode 2는 argparse 검증 실패 (스쿼드 이름/옵션 오류) — 4xx로 매핑
+        if result.returncode == 2:
+            raise HTTPException(400, result.stdout or result.stderr or "시뮬 인자 오류")
+        if result.returncode != 0:
+            raise HTTPException(500, result.stderr or result.stdout or "시뮬 실행 실패")
+
+        return SimResponse(
+            output=result.stdout,
+            stderr=result.stderr,
+            returncode=result.returncode,
+            cmd=cmd,
+            profile_used=temp_profile_name or req.profile,
         )
-    except subprocess.TimeoutExpired:
-        raise HTTPException(504, f"시뮬 시간 초과 ({DEFAULT_TIMEOUT}초)")
-    except FileNotFoundError as e:
-        raise HTTPException(500, f"Python 실행 파일 없음: {e}")
-
-    # returncode 2는 argparse 검증 실패 (스쿼드 이름/옵션 오류) — 4xx로 매핑
-    if result.returncode == 2:
-        raise HTTPException(400, result.stdout or result.stderr or "시뮬 인자 오류")
-    if result.returncode != 0:
-        raise HTTPException(500, result.stderr or result.stdout or "시뮬 실행 실패")
-
-    return SimResponse(
-        output=result.stdout,
-        stderr=result.stderr,
-        returncode=result.returncode,
-        cmd=cmd,
-    )
+    finally:
+        # 임시 프로필 파일 정리 (에러 있어도 삭제)
+        if temp_profile_path and temp_profile_path.exists():
+            try:
+                temp_profile_path.unlink()
+            except Exception:
+                pass  # 정리 실패는 무시 (다음 요청에 영향 없음)
