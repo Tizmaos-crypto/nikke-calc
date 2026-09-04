@@ -1,9 +1,11 @@
-# 원작자 저장소(Jgaram/nikke-calc)의 main 브랜치를 매일 자동으로 fork로 병합.
-# 충돌이 발생하면 이슈 자동 생성. 커밋이 있으면 push되고, Render가 자동 재배포.
+# 원작자 저장소(Jgaram/nikke-calc)의 master 브랜치를 매일 자동으로 fork로 병합.
+# 충돌이 발생하면 워크플로 실패 → GitHub이 이메일 알림. 커밋이 있으면 push되고, Render가 자동 재배포.
+#
+# 브랜치: fork도 upstream도 master 사용 (v0.2 fix — 이전 v0.1은 main으로 잘못 지정되어 있었음)
 #
 # 필요 설정:
-#   Settings → Secrets and variables → Actions → SYNC_TOKEN
-#   → GitHub Personal Access Token (권한: repo, workflow) 등록
+#   Settings → Actions → General → Workflow permissions → "Read and write permissions" 체크
+#   (또는 SYNC_TOKEN 시크릿에 PAT 등록 · 두 방법 중 하나면 됨)
 
 name: Sync from Jgaram/nikke-calc
 
@@ -15,20 +17,23 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: master
           token: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
 
-      - name: Add upstream + merge
+      - name: Add upstream + merge master
         run: |
           git config user.name "sync-bot"
           git config user.email "sync-bot@users.noreply.github.com"
           git remote add upstream https://github.com/Jgaram/nikke-calc.git
-          git fetch upstream main
-          git merge upstream/main --no-edit || {
-            echo "::error::충돌 발생 — 수동 병합 필요"
+          git fetch upstream master
+          git merge upstream/master --no-edit || {
+            echo "::error::충돌 발생 — 수동 병합 필요 (GitHub 웹에서 Sync fork 시도)"
             exit 1
           }
-          git push origin main
+          git push origin master
