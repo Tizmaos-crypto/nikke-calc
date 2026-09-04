@@ -1,0 +1,25 @@
+# Render 배포 설정 — 이 파일이 fork 저장소 루트에 있으면 Render가 자동 인식.
+#
+# 세팅 순서:
+# 1. https://dashboard.render.com/ 로그인 → New → Blueprint
+# 2. GitHub 계정 연결 → fork한 nikke-calc 저장소 선택
+# 3. Render가 이 파일을 읽어 자동으로 서비스 생성
+# 4. 배포 완료 후 URL 확인 (예: https://nikke-calc-api-xxxx.onrender.com)
+#
+# 환경변수:
+#   ALLOWED_ORIGINS — 우리 React 앱의 도메인 (콤마 구분). Render 대시보드에서 설정.
+#   예: https://your-app.vercel.app,https://your-domain.com,http://localhost:3000
+
+services:
+  - type: web
+    name: nikke-calc-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: ALLOWED_ORIGINS
+        sync: false  # 대시보드에서 수동 입력 (앱 도메인)
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+    healthCheckPath: /health
