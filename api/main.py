@@ -14,8 +14,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 import uuid
 from pathlib import Path
 from typing import List, Optional
@@ -36,7 +39,7 @@ ALLOWED_ORIGINS = [
     ).split(",") if o.strip()
 ]
 
-app = FastAPI(title="nikke-calc API", version="0.2.0")
+app = FastAPI(title="nikke-calc API", version="0.3.0")  # v0.3: dildoro boss share proxy
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -172,17 +175,55 @@ def _write_temp_profile(profile_data: dict) -> tuple[str, Path]:
 def root() -> dict:
     return {
         "name": "nikke-calc API",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "upstream": "https://github.com/Jgaram/nikke-calc",
         "license": "MIT (C) 2026 Jgaram",
-        "endpoints": ["GET /health", "POST /simulate"],
-        "features": ["profile_data in request body (v0.2.0)"],
+        "endpoints": ["GET /health", "POST /simulate", "GET /dildoro/boss?c=<code>"],
+        "features": ["profile_data in request body (v0.2.0)", "dildoro boss share proxy (v0.3.0)"],
     }
 
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "version": "0.2.0"}
+    return {"status": "ok", "version": "0.3.0"}
+
+
+# ─────────────────────────────────────────────────────────────
+# dildoro 보스 공유 프록시 (v0.3.0)
+# 브라우저는 dildoro.com에 CORS로 막혀서 우리 백엔드가 대신 부른다.
+# 우리 백엔드의 CORS는 우리 앱 도메인만 허용 (ALLOWED_ORIGINS).
+# ─────────────────────────────────────────────────────────────
+_DILDORO_CODE_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+
+
+@app.get("/dildoro/boss")
+def dildoro_boss_proxy(c: str) -> dict:
+    """dildoro.com/api/boss?c=<code> 응답을 그대로 반환.
+
+    유저가 웹앱에서 공유 코드/URL을 붙여넣으면 프론트가 이 endpoint를 호출.
+    반환된 JSON은 프론트에서 파싱해 우리 스키마로 매핑.
+    """
+    if not _DILDORO_CODE_RE.match(c or ""):
+        raise HTTPException(400, "잘못된 공유 코드 형식")
+    url = f"https://dildoro.com/api/boss?c={c}"
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (compatible; nikke-calc-api-proxy/0.3.0)",
+        "Accept": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=15) as res:
+            body = res.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        raise HTTPException(e.code, f"dildoro 응답 오류: HTTP {e.code}")
+    except urllib.error.URLError as e:
+        raise HTTPException(502, f"dildoro 접속 실패: {e.reason}")
+    except Exception as e:
+        raise HTTPException(500, f"프록시 오류: {e}")
+
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError as e:
+        raise HTTPException(502, f"dildoro 응답 JSON 파싱 실패: {e}")
 
 
 @app.post("/simulate", response_model=SimResponse)
