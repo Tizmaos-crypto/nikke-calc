@@ -2681,6 +2681,20 @@ class CharState:
         if wc_eff is not None:
             wc_max = wc_eff.get("max_ammo", -1)
             if wc_max != -1:
+                # 원문 `최대 장탄 수 : N발 X [게이지/스택] 개수`. **표기 장탄 자체가 카운터에
+                # 비례**하므로 장탄 *버프*와는 다른 층이고, `max_ammo_buff_applies`(괄호구)와
+                # 무관하게 곱한다. 값을 다시 재는 시점은 다른 장탄과 같아야 한다 —
+                # `_wc_ammo_full` 캐시를 쓰는 이유가 그것이다(모드 진입·재장전 완료뿐).
+                # 매 tick 재면 종료 조건(`모든 탄환 발사 시`)만 흔들려 탄이 마른 채
+                # 끝나지 않는 모드가 생긴다. (E.H. `인 투 더 헤븐`)
+                ref = wc_eff.get("max_ammo_scaling_ref")
+                if ref:
+                    if self._wc_ammo_full is None:
+                        n = bm.ref_count(self.name, ref)
+                        # None은 "그런 이름이 없다" → 배수 1. 0은 진짜 0이라 0발이 맞다
+                        # (모드가 첫 tick에 `모든 탄환 발사 시`로 스스로 끝난다).
+                        self._wc_ammo_full = int(wc_max) * (1 if n is None else int(n))
+                    return self._wc_ammo_full
                 # `(사용 무기 변경 시 최대 장탄 수 효과 갱신)` 문구가 없으면 표기 장탄 고정.
                 if not wc_eff.get("max_ammo_buff_applies"):
                     return int(wc_max)

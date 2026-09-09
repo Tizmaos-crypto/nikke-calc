@@ -131,6 +131,7 @@ print(json.dumps(data['캐릭터명'], ensure_ascii=False, indent=2))
 | `damage_coeff` | ✅ | weapon_change | 변경 무기 공격 계수. 레벨별이면 `{"1": 65.95, ...}`, 고정이면 float |
 | `first_damage_coeff` | 선택 | weapon_change | 원문이 `최초 대미지` / `일반 대미지`로 계수를 2단으로 적을 때 **모드 진입 첫 발**에만 쓰는 계수. `damage_coeff`에는 `일반 대미지` 쪽을 넣는다. 형식은 `damage_coeff`와 동일(레벨별 dict 또는 float). 생략하면 첫 발도 `damage_coeff`로 계산된다 (라플라스 `라플라스 버스터`) |
 | `max_ammo` | 선택 | weapon_change | 최대 장탄 수. 장탄 수 무한 또는 미명시 시 `-1` |
+| `max_ammo_scaling_ref` | 선택 | weapon_change | 원문이 `최대 장탄 수 : N발 X [게이지명/스택명] 개수`처럼 **표기 장탄을 카운터에 비례**시킬 때 기준이 되는 게이지/스택의 이름. `max_ammo`에는 N(1발분)을 적고 이 필드에 이름을 적는다 — 실효 장탄 = `max_ammo × 카운터 값`. 최대 장탄 **버프**를 받느냐는 별개 축이라 `(사용 무기 변경 시 최대 장탄 수 효과 갱신)` 괄호구가 그대로 가른다 (E.H. `인 투 더 헤븐`) |
 | `reload_time` | 선택 | weapon_change | 재장전 시간(초). 미명시 시 생략 |
 | `core_dmg_mult` | 선택 | weapon_change | 코어 대미지. 미명시 시 생략 |
 | `charge` | 선택 | weapon_change | 변경 무기가 **차지 무기인가**. 무기 유형과 독립된 축이라 `weapon_type`만으로는 못 가른다 — 드레이크 : 그레이트 빌런 `오버 오버 드라이브`가 SG인 채로 차지하는 첫 사례다. 생략하면 `weapon_type`의 무기군 기본값(SR/RL = 차지, AR/SMG/SG/MG = 연사)으로 떨어지므로, **기본값과 어긋날 때만 적는다** |

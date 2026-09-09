@@ -26350,5 +26350,234 @@
         "10": 1350.0
       }
     }
+  ],
+  "E.H.": [
+    {
+      "source": "스킬2",
+      "type": "instant",
+      "name": "정크 헌팅",
+      "trigger": {
+        "timing": [
+          "battle_start"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "gauge_charge",
+      "gauge_id": "폐품",
+      "fixed_value": 10,
+      "gauge_max": 10
+    },
+    {
+      "source": "스킬2",
+      "type": "instant",
+      "name": "정크 헌팅 2",
+      "trigger": {
+        "timing": [
+          "event:projectile_destroy"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "gauge_charge",
+      "gauge_id": "폐품",
+      "fixed_value": 1,
+      "gauge_max": 10
+    },
+    {
+      "source": "스킬2",
+      "type": "instant",
+      "name": "정크 헌팅 3",
+      "trigger": {
+        "timing": [
+          "event:part_destroy"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "gauge_charge",
+      "gauge_id": "폐품",
+      "fixed_value": 5,
+      "gauge_max": 10
+    },
+    {
+      "source": "스킬2",
+      "type": "instant",
+      "name": "정크 헌팅 4",
+      "trigger": {
+        "timing": [
+          "enemy_death"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "gauge_charge",
+      "gauge_id": "폐품",
+      "fixed_value": 2,
+      "gauge_max": 10
+    },
+    {
+      "source": "스킬2",
+      "type": "buff",
+      "name": "정크 헌팅 5",
+      "trigger": {
+        "timing": [
+          "battle_start",
+          "event:projectile_destroy",
+          "event:part_destroy",
+          "enemy_death"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "element_bonus_pct",
+      "polarity": "beneficial",
+      "values": {
+        "1": 9.67,
+        "2": 10.41,
+        "3": 11.16,
+        "4": 11.9,
+        "5": 12.64,
+        "6": 13.39,
+        "7": 14.13,
+        "8": 14.88,
+        "9": 15.62,
+        "10": 16.36
+      },
+      "duration": 15.0
+    },
+    {
+      "source": "스킬1",
+      "type": "buff",
+      "name": "홈메이드 매거진",
+      "trigger": {
+        "timing": [
+          "battle_start"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "atk_pct",
+      "polarity": "beneficial",
+      "values": {
+        "1": 4.43,
+        "2": 4.77,
+        "3": 5.11,
+        "4": 5.45,
+        "5": 5.8,
+        "6": 6.14,
+        "7": 6.48,
+        "8": 6.82,
+        "9": 7.16,
+        "10": 7.5
+      },
+      "duration": -1,
+      "scaling": "stack_count",
+      "scaling_ref": "사제 탄창",
+      "note": "원문은 「폐품 10개 획득 시 … [공격력 {0}% X 사제 탄창 개수 ▲] [지속]」. 게이지 조건(gauge_above·gauge_below)은 런타임 재평가 대상이라 [지속] 버프에 붙이면 폐품이 소비되는 순간 값이 꺼진다(GAMEPLAY §영구 버프에 런타임 조건 금지). duration -1 + scaling_ref는 게이지를 실시간 추종하므로 사제 탄창 0개일 때 0, 제작될 때마다 자동으로 커진다 — 조건 없이 battle_start 1회 부여가 등가다."
+    },
+    {
+      "source": "스킬1",
+      "type": "instant",
+      "name": "홈메이드 매거진 2",
+      "trigger": {
+        "timing": [
+          "battle_start",
+          "event:projectile_destroy",
+          "event:part_destroy",
+          "enemy_death"
+        ],
+        "condition": [
+          "gauge_above:폐품:10",
+          "gauge_below:사제 탄창:4"
+        ]
+      },
+      "target": "self",
+      "stat": "gauge_charge",
+      "gauge_id": "사제 탄창",
+      "fixed_value": 1,
+      "gauge_max": 4
+    },
+    {
+      "source": "스킬1",
+      "type": "instant",
+      "name": "홈메이드 매거진 3",
+      "trigger": {
+        "timing": [
+          "battle_start",
+          "event:projectile_destroy",
+          "event:part_destroy",
+          "enemy_death"
+        ],
+        "condition": [
+          "gauge_above:폐품:10",
+          "gauge_below:사제 탄창:4"
+        ]
+      },
+      "target": "self",
+      "stat": "gauge_consume",
+      "gauge_id": "폐품",
+      "fixed_value": -1,
+      "note": "원문 순서는 [폐품 제거]가 [사제 탄창 제작]보다 앞이지만, 먼저 비우면 같은 프레임의 제작 항목이 gauge_above:폐품:10을 못 넘긴다. 소비를 마지막에 두는 것은 네온 `초화력`·아크레인저 블랙 `변신`과 같은 규약이다."
+    },
+    {
+      "source": "스킬3",
+      "type": "weapon_change",
+      "name": "인 투 더 헤븐",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "weapon_type": "RL",
+      "damage_coeff": {
+        "1": 36.02,
+        "2": 38.8,
+        "3": 41.57,
+        "4": 44.35,
+        "5": 47.12,
+        "6": 49.9,
+        "7": 52.67,
+        "8": 55.45,
+        "9": 58.22,
+        "10": 61.0
+      },
+      "charge_time": 0.4,
+      "full_charge_mult": 250.0,
+      "max_ammo": 1,
+      "max_ammo_scaling_ref": "사제 탄창",
+      "duration": 10.0,
+      "duration_bullets": 1,
+      "note": "원문 「최대 장탄 수 : 1발 X 사제 탄창 개수」 — 표기 장탄이 게이지에 비례한다. 「(사용 무기 변경 시 최대 장탄 수 효과 갱신)」 괄호구가 없으므로 오버로드·큐브의 최대 장탄 버프는 얹히지 않는다. 「제거 시점 : 유지 시간 종료 또는 모든 탄환 발사 시」라 duration 10.0과 duration_bullets를 함께 선언한다(duration_bullets == max_ammo는 '모든 탄환 발사 시' 형태로 실효 장탄을 따라간다 — timeline._tick_weapon_change)."
+    },
+    {
+      "source": "스킬3",
+      "type": "buff",
+      "name": "인 투 더 헤븐 2",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "atk_pct",
+      "polarity": "beneficial",
+      "values": {
+        "1": 254.12,
+        "2": 273.67,
+        "3": 293.22,
+        "4": 312.76,
+        "5": 332.31,
+        "6": 351.86,
+        "7": 371.41,
+        "8": 390.96,
+        "9": 410.5,
+        "10": 430.05
+      },
+      "duration": 10.0
+    }
   ]
 }
