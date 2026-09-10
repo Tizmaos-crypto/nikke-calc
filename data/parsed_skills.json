@@ -2905,24 +2905,6 @@
     {
       "source": "스킬1",
       "type": "buff",
-      "name": "건강한 몸",
-      "trigger": {
-        "timing": [
-          "received_hit_count:1"
-        ],
-        "condition": [
-          "not_self_state:건강한 몸"
-        ]
-      },
-      "target": "self",
-      "stat": "invincible",
-      "polarity": "beneficial",
-      "duration": 3.0,
-      "max_trigger": 5
-    },
-    {
-      "source": "스킬1",
-      "type": "buff",
       "name": "건강한 몸 2",
       "trigger": {
         "timing": [
@@ -2966,6 +2948,25 @@
         "10": 10.26
       },
       "duration": 20.0
+    },
+    {
+      "source": "스킬1",
+      "type": "buff",
+      "name": "건강한 몸",
+      "trigger": {
+        "timing": [
+          "received_hit_count:1"
+        ],
+        "condition": [
+          "not_self_state:건강한 몸"
+        ]
+      },
+      "target": "self",
+      "stat": "invincible",
+      "polarity": "beneficial",
+      "duration": 3.0,
+      "max_trigger": 5,
+      "note": "담체를 `건강한 몸 2·3` 뒤로 민다 — 같은 clause의 `not_self_state:건강한 몸`이 효과별로 평가되므로 담체가 앞이면 자기가 게이트를 닫아 뒤 둘이 영원히 발동하지 않는다(`PARSING.md` Step 7). 트리거 `received_hit_count:1`이 보스 sim에서 뜨지 않고 셋 다 비딜 stat이라 딜 영향은 0이지만, 규칙을 세운 김에 맞춘다(2026-09-10)."
     },
     {
       "source": "스킬1",
@@ -13143,7 +13144,9 @@
         "8": 447.55,
         "9": 469.92,
         "10": 492.3
-      }
+      },
+      "hits_parts": true,
+      "note": "원문 「적 전체에게(파츠 포함)」 — hits_parts 누락분 보강(2026-09-10, 베스티 : 택티컬 업 등록 중 발견). part_dmg_pct가 실리는 히트는 이 표시가 있는 것뿐이고, 성립은 enemy.has_parts일 때다."
     },
     {
       "source": "스킬3",
@@ -27297,6 +27300,244 @@
       },
       "duration": 10.0,
       "note": "`추가 효과 — 대상 : 명중 대상에게 [내부 폭발탄 : 받는 대미지 N% ▲] [10초 유지]`. 무기 변경 모드의 사격은 `weapon_hit:` 이벤트를 쏘지 않으므로 `hit_count:1` + `self_state:[모드명]` 게이팅으로 센다(GAMEPLAY §무기 메카닉, 선례: 라플라스 `라플라스 버스터 4`). 이름을 모드와 **중복**시킨다 — 원문이 둘 다 `내부 폭발탄`으로 부르고, 자신 쪽은 `self_state:`(모드), 적 쪽은 `target_state:`(베스티 : 택티컬 업이 읽는다)로 참조되며 보유자가 달라 서로 오검출되지 않는다(PARSING Step 7 예외)"
+    }
+  ],
+  "베스티 : 택티컬 업": [
+    {
+      "source": "스킬1",
+      "type": "buff",
+      "name": "미사일 가이드 2",
+      "trigger": {
+        "timing": [
+          "full_charge_fire"
+        ],
+        "condition": [
+          "not_self_state:미사일 가이드"
+        ]
+      },
+      "target": "self",
+      "stat": "charge_dmg_pct",
+      "polarity": "beneficial",
+      "max_stack": 1,
+      "values": {
+        "1": 34.56,
+        "2": 37.22,
+        "3": 39.88,
+        "4": 42.54,
+        "5": 45.2,
+        "6": 47.86,
+        "7": 50.52,
+        "8": 53.18,
+        "9": 55.84,
+        "10": 58.5
+      },
+      "duration_bullets": 3,
+      "note": "원문 `[미사일 가이드 : 차지 속도 100% ▲]` 다음 줄이지만 배열에서는 앞에 둔다 — 위 `미사일 가이드`의 note 참조. 두 항목이 같은 프레임에 켜지고 같은 발수로 함께 소진되므로 실행 순서가 딜을 바꾸지 않는다."
+    },
+    {
+      "source": "스킬1",
+      "type": "buff",
+      "name": "미사일 가이드",
+      "trigger": {
+        "timing": [
+          "full_charge_fire"
+        ],
+        "condition": [
+          "not_self_state:미사일 가이드"
+        ]
+      },
+      "target": "self",
+      "stat": "charge_speed_pct",
+      "polarity": "beneficial",
+      "max_stack": 1,
+      "fixed_value": 100.0,
+      "duration_bullets": 3,
+      "note": "상태 담체(charge_speed_pct)를 **차지 대미지 항목 뒤에 둔다.** 같은 clause의 `not_self_state:미사일 가이드`가 효과별로 재평가되므로 담체가 앞에 있으면 자기가 게이트를 닫아 뒤 항목이 영원히 발동하지 않는다 (밀크 : 블루밍 바니 `부끄러움` 선례 — 거기서도 담체가 배열 끝이다). `full_charge_fire`는 `_BULLET_BOUND_TIMINGS`가 아니라 부여를 일으킨 그 발은 버프를 받지 못하고 발수로도 세지 않는다 → 4발에 1발꼴 미수혜."
+    },
+    {
+      "source": "스킬1",
+      "type": "instant",
+      "name": "미사일 가이드 3",
+      "trigger": {
+        "timing": [
+          "event:full_reload"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "remove_named_buff",
+      "target_effect": "미사일 가이드",
+      "note": "원문이 이름을 지정하므로 차지 대미지(미사일 가이드 2)는 지우지 않는다. 삭제 직후 첫 풀차지가 조건을 다시 충족해 둘 다 재부여한다."
+    },
+    {
+      "source": "스킬2",
+      "type": "damage",
+      "name": "몬스터 스테이지",
+      "trigger": {
+        "timing": [
+          "full_charge_hit"
+        ],
+        "condition": []
+      },
+      "target": "target",
+      "stat": "armor_break_damage",
+      "values": {
+        "1": 157.53,
+        "2": 169.65,
+        "3": 181.76,
+        "4": 193.88,
+        "5": 206.0,
+        "6": 218.12,
+        "7": 230.24,
+        "8": 242.36,
+        "9": 254.48,
+        "10": 266.6
+      }
+    },
+    {
+      "source": "스킬2",
+      "type": "buff",
+      "name": "몬스터 스테이지 2",
+      "trigger": {
+        "timing": [
+          "full_charge_hit"
+        ],
+        "condition": [
+          "self_state:전장 조성"
+        ]
+      },
+      "target": "self",
+      "stat": "atk_pct",
+      "polarity": "beneficial",
+      "max_stack": 1,
+      "values": {
+        "1": 11.82,
+        "2": 12.73,
+        "3": 13.64,
+        "4": 14.54,
+        "5": 15.45,
+        "6": 16.36,
+        "7": 17.27,
+        "8": 18.18,
+        "9": 19.09,
+        "10": 20.0
+      },
+      "duration": 3.0,
+      "note": "전장 조성은 엠마 : 택티컬 업 스킬3이 아군 전체에 거는 상태(10초). 엠마 없는 스쿼드에서는 영구 무발동."
+    },
+    {
+      "source": "스킬2",
+      "type": "buff",
+      "name": "몬스터 스테이지 3",
+      "trigger": {
+        "timing": [
+          "full_charge_hit"
+        ],
+        "condition": [
+          "target_state:내부 폭발탄"
+        ]
+      },
+      "target": "self",
+      "stat": "projectile_explosion_dmg_pct",
+      "polarity": "beneficial",
+      "max_stack": 1,
+      "values": {
+        "1": 11.82,
+        "2": 12.73,
+        "3": 13.64,
+        "4": 14.54,
+        "5": 15.45,
+        "6": 16.36,
+        "7": 17.27,
+        "8": 18.18,
+        "9": 19.09,
+        "10": 20.0
+      },
+      "duration": 3.0,
+      "note": "내부 폭발탄은 은화 : 택티컬 업이 대상에 거는 받는 대미지 디버프(10초). 은화 없는 스쿼드에서는 영구 무발동."
+    },
+    {
+      "source": "스킬3",
+      "type": "buff",
+      "name": "미사일 컨테이너 온라인",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "explosion_range",
+      "polarity": "beneficial",
+      "max_stack": 1,
+      "values": {
+        "1": 59.09,
+        "2": 63.63,
+        "3": 68.18,
+        "4": 72.72,
+        "5": 77.27,
+        "6": 81.81,
+        "7": 86.36,
+        "8": 90.91,
+        "9": 95.45,
+        "10": 100.0
+      },
+      "duration": 10.0
+    },
+    {
+      "source": "스킬3",
+      "type": "buff",
+      "name": "미사일 컨테이너 온라인 2",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "armor_break_dmg_pct",
+      "polarity": "beneficial",
+      "max_stack": 1,
+      "values": {
+        "1": 35.45,
+        "2": 38.18,
+        "3": 40.91,
+        "4": 43.63,
+        "5": 46.36,
+        "6": 49.09,
+        "7": 51.81,
+        "8": 54.54,
+        "9": 57.27,
+        "10": 60.0
+      },
+      "duration": 10.0
+    },
+    {
+      "source": "스킬3",
+      "type": "damage",
+      "name": "미사일 컨테이너 온라인 3",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": []
+      },
+      "target": "all_enemies",
+      "stat": "armor_break_burst_damage",
+      "values": {
+        "1": 290.9,
+        "2": 313.28,
+        "3": 335.66,
+        "4": 358.04,
+        "5": 380.41,
+        "6": 402.79,
+        "7": 425.17,
+        "8": 447.55,
+        "9": 469.92,
+        "10": 492.3
+      },
+      "hits_parts": true,
+      "note": "방어력 무시 + 버스트 스킬 대미지 복합. 원문 블록 순서상 앞의 방어력 무시 대미지 60% ▲(미사일 컨테이너 온라인 2)를 받는다."
     }
   ]
 }

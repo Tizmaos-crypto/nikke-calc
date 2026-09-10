@@ -179,6 +179,15 @@ if timing.startswith("new_event:") and event == "new_event":
 | 버프 발동 시 1회 | `_condition_ok()` |
 | 대미지 계산 시마다 | `_runtime_condition_ok()` |
 
+> **재평가 대상은 「유한 수명이 없는 버프」다** (`_has_runtime_cond`). 가르는 값이 `expires_at`
+> 하나여서 오래 구멍이 있었다 — `[N발 유지]`(`duration_bullets`)는 시간 만료가 없어
+> `expires_at`이 `inf`로 남고, 그래서 `[N초 유지]`와 같은 유한 수명인데도 재평가에 끌려갔다.
+> 2026-09-10에 `duration_bullets != -1`도 제외로 넣었다. 없을 때 생기는 일:
+> **자기 상태 이름을 `not_self_state:`로 막는 재부여 게이트가 스스로를 꺼 버린다**
+> (베스티 : 택티컬 업 `미사일 가이드` — 차지 속도 100%·차지 대미지 58.5가 실측 0이었다).
+> 소급 영향은 팬텀 `괴도의 예고장`(`[1발 유지]` + `target_state:예고장`) 하나로,
+> 예고장을 지우는 그 발이 이제 버프를 정상적으로 받는다.
+
 ### Step 5 — 새 target 유형 추가 시
 
 새 target 패턴 사용 캐릭터 → `buff_manager.py` 수정.
@@ -365,6 +374,7 @@ python calculator/damage.py
 | `split_damage` | `is_split=True` | ✅ | |
 | `bonus_damage` | — | ✅ | `timing: "burst_cast"` 시 **3버스트 캐릭터만** `_pending_burst_dmg`에 보류하고 `full_burst_start`에서 계산한다(유저 확인) — 풀버스트는 B3 발동 직후 시작하므로 B3의 추가 대미지만 풀버스트 버프를 받는다. B1/B2는 풀버스트보다 몇 초 앞서 발동하므로 `burst_cast` 시점 버프로 즉시 계산(헬름 : 아쿠아마린 `이지스 캐논 오버로드 2`). 보류된 B3 딜은 계산이 뒤로 밀려 원문 블록 순서가 깨지므로, `_later_burst_cast_buffs()`가 "이 딜보다 **뒤에** 서술된 같은 `burst_cast` buff" 이름을 모아 `get_buffs(exclude_names=...)`로 제외한다 (GAMEPLAY.md §효과 실행 순서. 로산나 `벤데타` ← `벤데타 2` 받는 대미지) |
 | `armor_break_damage` | `is_armor_break_damage=True` | ✅ | ②에서 적 방어력 0 처리 |
+| `armor_break_burst_damage` | `is_armor_break_damage=True` + `is_burst_damage=True` (+ `is_aoe_burst`) | ✅ | 「방어력 무시 **버스트 스킬** 대미지」 복합. 두 플래그를 함께 켜야 ②(적 방어력 0)·⑤(`armor_break_dmg_pct`)·⑧(`burst_dmg`, `all_enemies`면 `burst_dmg_aoe_pct`)이 모두 실린다. `_handle_damage_eff()`의 `base_stat` 비교 세 곳(`is_burst_damage`·`is_aoe_burst`·`is_armor_break_damage`)에 이 stat을 함께 넣는 것이 전부다. 베스티 : 택티컬 업 `미사일 컨테이너 온라인 3` |
 | `first_damage_coeff` (weapon_change 필드) | — | ✅ | stat이 아니라 **`type: "weapon_change"` 항목의 필드**. 원문 `최초 대미지` / `일반 대미지` 2단 계수에서 **모드 진입 첫 발**에만 쓰는 계수(`damage_coeff`는 일반 대미지 쪽). `_tick_weapon_change()`가 레벨 환산해 `_wc_first_coeff`/`_wc_normal_coeff`에 싣고, 발사 직전 `_apply_wc_first_coeff()`가 `_wc_shots == 0`일 때만 첫 계수로 `self.weapon`을 갈아끼운다. **첫 발이 아닐 때 일반 계수로 되돌리는 게 필수** — 연사 24/s + dt 0.05s면 한 tick에 두 발이 나가므로, 되돌리지 않으면 같은 tick의 둘째 발까지 최초 대미지로 나간다. 필드가 없으면 `_wc_first_coeff`가 None이라 기존 동작 그대로. 보유: 라플라스 `라플라스 버스터`(1455.72 vs 22.2 @lv10) |
 | `entry_reload` (weapon_change 필드) | — | ✅ | stat이 아니라 **`type: "weapon_change"` 항목의 필드**. `_tick_weapon_change()` 진입부가 `_wc_new_session`일 때 `_wc_entry_reload_until = t + _reload_duration()`을 잡고 그때까지 빈 리스트를 반환한다 — 재장전이 끝나는 프레임에 `_charge_phase`·`_charge_start_t`를 t로 초기화해 **차지가 재장전 뒤에 시작**하게 만든다(초기화를 빼면 재장전이 공짜가 된다). 필드가 없으면 `_wc_entry_reload_until`이 −1로 남아 기존 동작 그대로. 보유: 드레이크 : 그레이트 빌런 `오버 오버 드라이브` |
 | `max_ammo_scaling_ref` (weapon_change 필드) | — | ✅ | stat이 아니라 **`type: "weapon_change"` 항목의 필드**. 원문 `최대 장탄 수 : N발 X [게이지명/스택명] 개수`처럼 **표기 장탄 자체가 카운터에 비례**할 때, `max_ammo`(=N)에 `ref_count(caster, 이 이름)`을 곱한 값이 모드의 실효 장탄이 된다. 최대 장탄 **버프**(`max_ammo_pct`·오버로드·큐브)와는 다른 층이다 — 그쪽은 `(사용 무기 변경 시 최대 장탄 수 효과 갱신)` 괄호구가 있는 모드만 받고(`max_ammo_buff_applies`), 이 필드는 괄호구와 **무관하게** 표기값을 정한다. 구현은 `timeline._full_ammo()`이고 `max_ammo_buff_applies` 분기보다 **앞**에 선다. 값을 읽는 시점은 다른 장탄과 같아야 하므로 `_wc_ammo_full` 캐시를 그대로 쓴다 — **모드 진입과 재장전 완료뿐**(GAMEPLAY.md §무기 메카닉). `ref_count`가 `None`(그런 이름 없음)이면 배수 1, `0`이면 **0발이 맞다** — `duration_bullets == max_ammo`(모든 탄환 발사 시 제거) 판정이 곱한 뒤 값을 쓰므로 모드가 첫 tick에 스스로 끝난다. 필드가 없으면 종전 동작 그대로. 보유: E.H. `인 투 더 헤븐`(1발 × 사제 탄창 1~4개) |

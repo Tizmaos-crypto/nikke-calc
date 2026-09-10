@@ -4095,11 +4095,15 @@ def simulate(
             # 파츠 판정은 원문이 파츠를 명시한 스킬(hits_parts)에만 붙는다 — 파츠 보스일 때만
             is_part=(bool(eff.get("hits_parts")) and enm.get("has_parts", False)),
             is_optimal_range=(weapon_type in enm.get("optimal_range_weapons", []) and is_normal),
-            is_burst_damage=(base_stat == "burst_damage"),
+            # 「방어력 무시 버스트 스킬 대미지」는 두 축의 복합이라 플래그를 함께 켠다
+            # (베스티 : 택티컬 업 `미사일 컨테이너 온라인 3`)
+            is_burst_damage=(base_stat in ("burst_damage", "armor_break_burst_damage")),
             # 대상 설명이 '적 전체에게'인 버스트 대미지 → burst_dmg_aoe_pct 수혜
-            is_aoe_burst=(base_stat == "burst_damage" and target_field == "all_enemies"),
+            is_aoe_burst=(base_stat in ("burst_damage", "armor_break_burst_damage")
+                          and target_field == "all_enemies"),
             is_pierce_damage=(base_stat == "pierce_damage"),
-            is_armor_break_damage=(base_stat == "armor_break_damage"),
+            is_armor_break_damage=(base_stat in ("armor_break_damage",
+                                                 "armor_break_burst_damage")),
             is_dot=(base_stat == "dot_damage"),
             is_projectile_explosion=(base_stat == "projectile_explosion_damage"
                                      or (is_normal and cs.base_weapon_type == "RL")),
