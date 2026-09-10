@@ -368,7 +368,8 @@ _RUNTIME_COND_PREFIXES = frozenset([
 ])
 
 
-def _has_runtime_cond(conditions: list, expires: float) -> bool:
+def _has_runtime_cond(conditions: list, expires: float,
+                      duration_bullets: int = -1) -> bool:
     """
     이 버프가 get_buffs 시점마다 조건을 재평가해야 하는지.
 
@@ -380,8 +381,15 @@ def _has_runtime_cond(conditions: list, expires: float) -> bool:
     재평가는 duration -1 / null (지속·영구) 버프에만 적용한다. 그쪽은 만료 시각이
     없으므로 조건이 곧 유효 구간이다 (조건부 passive와 같은 기준 — tick()의
     `ab.expires_at < math.inf: continue` 참고).
+
+    **`[N발 유지]`(`duration_bullets`)도 유한 지속이라 재평가하지 않는다.** 시간이
+    아니라 발수로 끝날 뿐 "발동 시점 게이트 + 정해진 수명"이라는 구조는 `[N초 유지]`와
+    같다 — 남은 한 발을 쏠 때까지는 그 발이 버프를 받아야 한다. 눈금이 초가 아니어서
+    `expires_at`이 `inf`로 남는 탓에 위 게이트를 그냥 통과했고, 그 결과 **자기 상태
+    이름을 `not_self_state:`로 막는 재부여 게이트가 스스로를 꺼 버렸다**
+    (베스티 : 택티컬 업 `미사일 가이드` — 차지 속도 100%·차지 대미지 58.5가 실측 0).
     """
-    if expires != math.inf:
+    if expires != math.inf or duration_bullets != -1:
         return False
     for c in conditions:
         for prefix in _RUNTIME_COND_PREFIXES:
@@ -1081,7 +1089,9 @@ class BuffManager:
                         activated_at=t,
                         expires_at=expires,
                         stack=init_stack,
-                        has_runtime_conditions=_has_runtime_cond(target_eff["trigger"].get("condition", []), expires),
+                        has_runtime_conditions=_has_runtime_cond(
+                            target_eff["trigger"].get("condition", []), expires,
+                            target_eff.get("duration_bullets", -1)),
                         scaling_stack=self._capture_scaling_stack(target_eff, caster),
                     )
                     self._active.append(ab_new)
@@ -2159,7 +2169,9 @@ class BuffManager:
                     self._active.append(ActiveBuff(
                         effect=eff, caster=caster, target_chars=targets,
                         activated_at=t, expires_at=expires, stack=init_stack,
-                        has_runtime_conditions=_has_runtime_cond(eff["trigger"].get("condition", []), expires),
+                        has_runtime_conditions=_has_runtime_cond(
+                            eff["trigger"].get("condition", []), expires,
+                            eff.get("duration_bullets", -1)),
                     ))
                     if self._buff_event_handler and eff.get("name") and targets:
                         for tgt in targets:
@@ -2337,7 +2349,8 @@ class BuffManager:
                 bullets_left=-1 if use_per_target else duration_bullets,
                 bullets_per_target={c: duration_bullets for c in (targets or [])} if use_per_target else {},
                 per_char_stacks={c: 1 for c in (targets or [])} if (use_per_target and max_stack != 1) else {},
-                has_runtime_conditions=_has_runtime_cond(eff["trigger"].get("condition", []), expires),
+                has_runtime_conditions=_has_runtime_cond(
+                    eff["trigger"].get("condition", []), expires, duration_bullets),
                 scaling_stack=self._capture_scaling_stack(eff, caster),
             ))
             name = eff.get("name", "")
