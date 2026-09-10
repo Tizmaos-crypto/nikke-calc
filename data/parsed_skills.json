@@ -1900,16 +1900,49 @@
     },
     {
       "source": "스킬2",
+      "type": "instant",
+      "name": "과열 명중 누적",
+      "trigger": {
+        "timing": [
+          "hit_count:1"
+        ],
+        "condition": [
+          "self_state:미래 예지"
+        ]
+      },
+      "target": "self",
+      "stat": "gauge_charge",
+      "gauge_id": "과열 명중",
+      "fixed_value": 1.0
+    },
+    {
+      "source": "스킬2",
+      "type": "instant",
+      "name": "과열 명중 초기화",
+      "trigger": {
+        "timing": [
+          "event:미래 예지"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "gauge_consume",
+      "gauge_id": "과열 명중",
+      "fixed_value": -1.0,
+      "note": "미래 예지 재적용마다 로컬 카운터를 0으로 되돌린다(전량 소모)"
+    },
+    {
+      "source": "스킬2",
       "type": "buff",
       "name": "과열 II",
       "trigger": {
         "timing": [
-          "event:미래 예지",
-          "hit_count:30"
+          "passive"
         ],
         "condition": [
           "self_state:미래 예지",
-          "self_state:과열 I"
+          "self_state:과열 I",
+          "gauge_above:과열 명중:30"
         ]
       },
       "target": "self",
@@ -1927,7 +1960,8 @@
         "9": 19.72,
         "10": 20.66
       },
-      "duration": -1
+      "duration": -1,
+      "note": "`미래 예지 상태 적용 후 일반 공격 30회 명중 시` — 전역 `hit_count:30`이 아니라 미래 예지마다 리셋되는 로컬 카운터다. `한하여` + `[지속]`이라 게이트가 곧 유효 구간이므로 `passive` 등록 + 런타임 재판정으로 둔다(같은 캐릭터 `방열 4·5·6`과 같은 모양)"
     },
     {
       "source": "스킬2",
@@ -1935,12 +1969,12 @@
       "name": "과열 III",
       "trigger": {
         "timing": [
-          "event:미래 예지",
-          "hit_count:60"
+          "passive"
         ],
         "condition": [
           "self_state:미래 예지",
-          "self_state:과열 II"
+          "self_state:과열 II",
+          "gauge_above:과열 명중:60"
         ]
       },
       "target": "self",
@@ -1958,7 +1992,8 @@
         "9": 29.4,
         "10": 30.8
       },
-      "duration": -1
+      "duration": -1,
+      "note": "위와 같은 구조의 60회 단계. `self_state:과열 II`는 원문 충실성 표기이고 실효 게이트는 `gauge_above:과열 명중:60`이다 — `_has_self_state()`가 condition을 보지 않아 조건부 영구 passive는 조건이 거짓이어도 상태로 성립한다(PARSING-CHARS 엠마 행)"
     },
     {
       "source": "스킬3",
