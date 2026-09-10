@@ -694,8 +694,22 @@ def check_stacking_dot() -> bool:
 #
 # `weapon_change` 모드명은 `_active`가 아니라 `state["weapon_change"]`에 있고
 # `_has_self_state`가 그쪽도 보므로 통과시킨다(목단 `무기 변경`).
+#
+# **담체는 자기 스킬에만 있는 게 아니다** (2026-09-10, 엠마·은화 : 택티컬 업 등록 중).
+# `_has_self_state(caster, X)`는 "그 캐릭터가 이름 X인 활성 버프의 수령자인가"만 보므로,
+# **아군이 걸어 준 상태**도 그대로 성립한다. 엠마의 `self_state:포메이션 AS`는 은화가,
+# 은화의 `self_state:포메이션 LT`는 엠마가 거는 식이다(둘 다 `allies_squad` 대상).
+# 그래서 자기 항목에서 못 찾으면 로스터 전체에서 한 번 더 찾고, **아군에게 닿는 대상**
+# (`target`이 `self` 하나가 아닌)일 때만 통과시킨 뒤 교차 담체로 따로 보고한다.
 
 _PERSISTENT_TYPES = {"buff", "debuff", "weapon_change"}
+
+
+def _reaches_allies(eff: dict) -> bool:
+    """이 효과가 시전자 아닌 아군에게도 닿는가 (교차 담체 판정용)."""
+    tgt = eff.get("target", "self")
+    targets = tgt if isinstance(tgt, list) else [tgt]
+    return any(t != "self" for t in targets)
 
 
 def check_state_carrier() -> bool:
@@ -703,7 +717,20 @@ def check_state_carrier() -> bool:
     data = json.loads(SKILLS.read_text(encoding="utf-8"))
     print("\n=== K. 상태 참조의 담체 (self_state·state_end ↔ 지속 효과) ===")
     bad: list[str] = []
+    cross: list[str] = []
     total = 0
+
+    # 로스터 전체 담체 색인: 이름 → {거는 캐릭터}. 아군에게 닿는 지속 효과만 담는다
+    ally_carriers: dict[str, set[str]] = {}
+    for owner, effects in data.items():
+        if owner.startswith("test_") or not isinstance(effects, list):
+            continue
+        for eff in effects:
+            if not isinstance(eff, dict) or not eff.get("name"):
+                continue
+            if eff.get("type") in _PERSISTENT_TYPES and _reaches_allies(eff):
+                ally_carriers.setdefault(eff["name"], set()).add(owner)
+
     for name, effects in data.items():
         if name.startswith("test_") or not isinstance(effects, list):
             continue
@@ -736,9 +763,15 @@ def check_state_carrier() -> bool:
             if ref in wc_modes or ref == WEAPON_CHANGE_STATE:
                 continue          # 무기 변경 모드는 state["weapon_change"]가 담체다
             types = kinds.get(ref)
-            if types is None:
+            if types and (types & _PERSISTENT_TYPES):
+                continue
+            others = sorted(ally_carriers.get(ref, set()) - {name})
+            if others:
+                # 아군이 걸어 주는 상태 — `_has_self_state`는 수령자 기준이라 정상 성립한다
+                cross.append(f"{name} / {ref}  ← {', '.join(others)}")
+            elif types is None:
                 bad.append(f"{name} / {ref}  — 그 이름의 효과가 없다")
-            elif not (types & _PERSISTENT_TYPES):
+            else:
                 bad.append(f"{name} / {ref}  — {sorted(t for t in types if t)}에만 붙어 있다")
 
     for b in bad:
@@ -748,6 +781,8 @@ def check_state_carrier() -> bool:
               "그 상태와 같이 사는 **지속 효과**에 붙인다 (`PARSING.md` §상태의 담체)")
     else:
         print(f"  (일치 — 상태 참조 {total}건)")
+    for c in cross:
+        print(f"  교차 담체(아군이 거는 상태): {c}")
     return bool(bad)
 
 

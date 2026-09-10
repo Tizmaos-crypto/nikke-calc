@@ -481,6 +481,7 @@ template에 timing 키워드 없으면:
 | `화력형 아군 전체에게` | `"allies_class:공격"` |
 | `방어형 아군 전체에게` | `"allies_class:방어"` |
 | `지원형 아군 전체에게` | `"allies_class:지원"` |
+| `동일 스쿼드 아군 전체에게` | `"allies_squad"` — 소속 스쿼드(`parsed_nikke["squad"]`) 기준, **시전자 포함**. condition `squad_ally_exists`와 같은 판정의 대상판이다 |
 | `수냉/작열/전격 코드 아군 전체에게` | `"allies_code:수냉"` 등 |
 | `자신을 제외한 수냉/작열/전격 코드 아군 전체에게` | `"allies_code_excl_self:수냉"` 등 — 시전자 포함판과 별도 키다. 원문에 `자신을 제외한`이 있으면 반드시 이쪽 |
 | `전격 코드 소총 아군 전체에게` (코드+무기 복합) | `"allies_code_weapon:전격:AR"` — `코드:무기유형` 순. **`소총` = AR**(SR은 `스나이퍼 라이플`, MG는 `머신건`, SMG는 `기관단총`, SG는 `샷건`, RL은 `로켓 런처`로 각각 별도 표기) |
@@ -595,6 +596,7 @@ template에 timing 키워드 없으면:
 | `effect_interval` | 특정 효과의 발동 간격 N초 ▼ (`target_effect` 필수) |
 | `dmg_scale_mag_pct` | 특정 효과의 대미지 배율 N% ▲ (`target_effect` 필수). 해당 효과의 values를 런타임에 `(1 + N/100)` 배율로 증폭 |
 | `atk_buff_mag_pct` | 특정 named buff의 공격력 증가 배율 N% ▲ (`target_effect` 필수). `target_effect`로 지정된 named buff의 `atk_caster_based_pct` 값을 `(1 + N/100)` 배율로 증폭 |
+| `received_dmg_buff_mag_pct` | 특정 named buff의 **받는 대미지 증가 배율** N% ▲ (`target_effect` 필수). 위와 같은 층이고 증폭 대상만 `received_dmg_pct`다. 텍스트: `[효과명] 받는 대미지 증가 배율이 N% 증가 상태로 변경`. 대미지 계수를 키우는 `dmg_scale_mag_pct`와 구분한다 — 이쪽은 **디버프 수치**를 키운다 |
 | `lifesteal_pct` | 공격 대미지 비례 N% 체력 회복 |
 | `armor_break_dmg_pct` | 방어력 무시 대미지 % ▲ |
 | `projectile_dmg_pct` | 발사체에 가하는 대미지 % ▲ |

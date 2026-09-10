@@ -292,9 +292,10 @@ python calculator/damage.py
 | `pierce_range` | — | — | ❌ | 관통 범위 증가. 미구현 |
 | `pierce_enabled` | `pierce_enabled` | — | ✅ | boolean 플래그. `get_buffs()` boolean 분기에서 `True` 세팅. `_fire()`/`_tick_charge()`에서 `is_pierce_damage`에 반영 |
 | `fullburst_duration` | `fullburst_duration` | — | ✅ | 게임 내 동작은 instant이나, `switching→full_burst` 진입 시점에 값을 읽어야 하므로 buff로 등록해 보관. `BurstController.tick()`의 switching 단계에서 `bm._active`를 순회해 합산 후 `_full_burst_end_t` 결정. `burst_cast` 타이밍으로 등록된 버프는 해당 캐릭터가 이번 사이클의 3단계 발동자(`_fb_caster`)일 때만 반영 — 본인 버스트 때만 지속 시간을 바꾸는 캐릭터 지원. 모든 풀버스트에 적용되는 캐릭터는 `passive` 등 다른 타이밍을 사용하면 `_fb_caster` 조건 없이 항상 반영됨 |
-| `effect_interval` | — | — | ✅ | `target_effect`가 가리키는 `every:Ns` 효과의 주기를 **초 단위로 가감**. `tick()`의 `every:Ns` 루프에서 `_active`를 탐색해 `stat=="effect_interval" and target_effect==eff["name"]`인 버프 값을 합산, `base_interval + flat`에 `skill_cooldown_pct` 배율을 곱한다. `_STAT_TO_BUFF` 매핑 없음. `target_effect` 필수. 에이다 `섬광 수류탄 투척 발동 시간 조건` |
+| `effect_interval` | — | — | ✅ | `target_effect`가 가리키는 `every:Ns` 효과의 주기를 **초 단위로 가감**. `tick()`의 `every:Ns` 루프에서 `_active`를 탐색해 `stat=="effect_interval" and target_effect==eff["name"]`인 버프 값을 합산, `base_interval + flat`에 `skill_cooldown_pct` 배율을 곱한다. **런타임 조건을 재평가한다**(2026-09-10) — 조건부 영구 버프는 조건이 거짓이어도 `_active`에 등록되므로, 안 보면 꺼져 있어야 할 주기 단축이 그대로 먹는다(엠마 : 택티컬 업 `포메이션 LT 5~7`은 은화가 없으면 30초 주기를 유지해야 한다). `_STAT_TO_BUFF` 매핑 없음. `target_effect` 필수. 에이다 `섬광 수류탄 투척 발동 시간 조건`(조건 없음 — 이 변경의 영향 밖) |
 | `dmg_scale_mag_pct` | — | — | ✅ | 특정 효과(`target_effect`)의 대미지 배율 N% ▲. `_handle_damage_eff`에서 `bm._active`를 탐색해 `stat=="dmg_scale_mag_pct" and target_effect==eff_name`인 버프를 찾아 `coeff *= (1 + mag/100)` 적용. `_STAT_TO_BUFF` 매핑 없음 (`buff` type으로 `_active`에 등록됨) |
 | `atk_buff_mag_pct` | — | ② | ✅ | 특정 named buff(`target_effect`)의 `atk_caster_based_pct` 값 N% ▲. `get_buffs()` 후처리 `atk_caster_based_pct` 루프 안에서 `atk_buff_mag_pct` 버프를 탐색해 `coeff * (1 + N/100)` 배율 적용. `_STAT_TO_BUFF` 매핑 없음 |
+| `received_dmg_buff_mag_pct` | — | ⑥ | ✅ | 특정 named buff(`target_effect`)의 `received_dmg_pct` 값 N% ▲. `atk_buff_mag_pct`와 같은 층이고 곱하는 대상만 다르다 — 적에게 붙은 「받는 대미지 ▲」 디버프의 수치를 `(1 + N/100)`배. 원문 「[효과명] 받는 대미지 증가 **배율**이 N% 증가 상태로 변경」. `target_effect` 필수, `fixed_value`에 N. `get_buffs()` 후처리에서 `_by_stat`으로 증폭 버프를 찾고 `_by_name(target_effect)`의 `received_dmg_pct` 버프 중 **같은 대상에게 걸린 것**만 골라 **증분(`base × N/100`)만** 더한다 — 기본값은 본 루프가 이미 더했으므로, 증폭이 없는 기존 로스터의 합산 순서·부동소수점 결과가 그대로 유지된다. `_STAT_TO_BUFF` 매핑 없음. 엠마 : 택티컬 업 `환경 조성 강화`(환경 조성 3.9% → 7.8%) |
 | `lifesteal_pct` | `lifesteal_pct` | — | ✅ | 대미지 × lifesteal_pct% 만큼 시전자 HP 회복. `event:heal_received` 발생 |
 | `armor_break_dmg_pct` | `armor_break_dmg_pct` | ⑤ | ✅ | `is_armor_break_damage=True` 히트에만 가산. ②에서 적 방어력 0 처리 |
 | `projectile_dmg_pct` | — | — | ❌ | 발사체 대미지 ▲. 미구현 |
@@ -600,6 +601,7 @@ lazy resolve: 버프 반영 스탯 기준 정렬 필요 target → `_activate()`
 | `"allies_code_excl_self:코드"` | ❌ | ✅ | 자신 제외 해당 코드 아군 전체. `allies_code:`와 별도 분기다 — 메이든 : 아이스 로즈 `블레스 유`·`블레스 유 2`는 아군판/자기판이 배타 분기라 시전자를 빼지 않으면 한쪽이 양쪽을 다 받는다 |
 | `"allies_code_weapon:코드:무기유형"` | ❌ | ✅ | 코드+무기 복합 조건 아군 전체. `_code_weapon()` 헬퍼가 `element_code`·`weapon_type` 동시 필터. 트리나(`전격:AR`) |
 | `"allies_code_weapon_leftmost:코드:무기유형:N"` | ❌ | ✅ | 위 조건을 만족하는 아군 중 **스쿼드 입력 순서 앞 N명**. 고정 속성 기반이라 lazy resolve 불필요. 매칭 0명이면 빈 리스트. 트리나(`전격:AR:1`) |
+| `"allies_squad"` | ❌ | ✅ | **동일 스쿼드**(`parsed_nikke["squad"]` — 앱솔루트·카운터스·이지스 등) 아군 전체. **시전자 포함**이고, 스쿼드가 없는 더미(`test_B*`)는 제외된다 — condition `squad_ally_exists`와 같은 기준의 대상판. 엠마 : 택티컬 업 `포메이션 LT` · 은화 : 택티컬 업 `포메이션 AS`(둘이 서로의 `self_state:` 게이팅을 여는 자리라 대상이 좁아지면 추가 효과 6종이 통째로 죽는다) |
 | `"allies_below_def"` | ✅ | ✅ | `_LAZY_RESOLVE_PREFIXES` 등록됨. 시전자보다 방어력 낮은 아군 전체 |
 | `"allies_burst3"` | ❌ | ✅ | 기본 버스트 단계가 Step 3인 아군 전체. `burst_stages` 기준 |
 | `"allies_top_base_charge_time:N"` | ❌ | ✅ | 기본(버프 제외) 차지 시간이 가장 긴 아군 N기. `parsed_nikke["charge_time"]` 기준 고정 속성이라 lazy resolve 불필요. 차지 무기 아군이 없으면 빈 리스트, 동률이면 스쿼드 입력 순서. 마나 `매터 시그마 4` |
