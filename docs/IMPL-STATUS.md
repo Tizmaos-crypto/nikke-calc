@@ -179,6 +179,15 @@ if timing.startswith("new_event:") and event == "new_event":
 | 버프 발동 시 1회 | `_condition_ok()` |
 | 대미지 계산 시마다 | `_runtime_condition_ok()` |
 
+> **재평가 대상은 「유한 수명이 없는 버프」다** (`_has_runtime_cond`). 가르는 값이 `expires_at`
+> 하나여서 오래 구멍이 있었다 — `[N발 유지]`(`duration_bullets`)는 시간 만료가 없어
+> `expires_at`이 `inf`로 남고, 그래서 `[N초 유지]`와 같은 유한 수명인데도 재평가에 끌려갔다.
+> 2026-09-10에 `duration_bullets != -1`도 제외로 넣었다. 없을 때 생기는 일:
+> **자기 상태 이름을 `not_self_state:`로 막는 재부여 게이트가 스스로를 꺼 버린다**
+> (베스티 : 택티컬 업 `미사일 가이드` — 차지 속도 100%·차지 대미지 58.5가 실측 0이었다).
+> 소급 영향은 팬텀 `괴도의 예고장`(`[1발 유지]` + `target_state:예고장`) 하나로,
+> 예고장을 지우는 그 발이 이제 버프를 정상적으로 받는다.
+
 ### Step 5 — 새 target 유형 추가 시
 
 새 target 패턴 사용 캐릭터 → `buff_manager.py` 수정.
@@ -292,9 +301,10 @@ python calculator/damage.py
 | `pierce_range` | — | — | ❌ | 관통 범위 증가. 미구현 |
 | `pierce_enabled` | `pierce_enabled` | — | ✅ | boolean 플래그. `get_buffs()` boolean 분기에서 `True` 세팅. `_fire()`/`_tick_charge()`에서 `is_pierce_damage`에 반영 |
 | `fullburst_duration` | `fullburst_duration` | — | ✅ | 게임 내 동작은 instant이나, `switching→full_burst` 진입 시점에 값을 읽어야 하므로 buff로 등록해 보관. `BurstController.tick()`의 switching 단계에서 `bm._active`를 순회해 합산 후 `_full_burst_end_t` 결정. `burst_cast` 타이밍으로 등록된 버프는 해당 캐릭터가 이번 사이클의 3단계 발동자(`_fb_caster`)일 때만 반영 — 본인 버스트 때만 지속 시간을 바꾸는 캐릭터 지원. 모든 풀버스트에 적용되는 캐릭터는 `passive` 등 다른 타이밍을 사용하면 `_fb_caster` 조건 없이 항상 반영됨 |
-| `effect_interval` | — | — | ✅ | `target_effect`가 가리키는 `every:Ns` 효과의 주기를 **초 단위로 가감**. `tick()`의 `every:Ns` 루프에서 `_active`를 탐색해 `stat=="effect_interval" and target_effect==eff["name"]`인 버프 값을 합산, `base_interval + flat`에 `skill_cooldown_pct` 배율을 곱한다. `_STAT_TO_BUFF` 매핑 없음. `target_effect` 필수. 에이다 `섬광 수류탄 투척 발동 시간 조건` |
+| `effect_interval` | — | — | ✅ | `target_effect`가 가리키는 `every:Ns` 효과의 주기를 **초 단위로 가감**. `tick()`의 `every:Ns` 루프에서 `_active`를 탐색해 `stat=="effect_interval" and target_effect==eff["name"]`인 버프 값을 합산, `base_interval + flat`에 `skill_cooldown_pct` 배율을 곱한다. **런타임 조건을 재평가한다**(2026-09-10) — 조건부 영구 버프는 조건이 거짓이어도 `_active`에 등록되므로, 안 보면 꺼져 있어야 할 주기 단축이 그대로 먹는다(엠마 : 택티컬 업 `포메이션 LT 5~7`은 은화가 없으면 30초 주기를 유지해야 한다). `_STAT_TO_BUFF` 매핑 없음. `target_effect` 필수. 에이다 `섬광 수류탄 투척 발동 시간 조건`(조건 없음 — 이 변경의 영향 밖) |
 | `dmg_scale_mag_pct` | — | — | ✅ | 특정 효과(`target_effect`)의 대미지 배율 N% ▲. `_handle_damage_eff`에서 `bm._active`를 탐색해 `stat=="dmg_scale_mag_pct" and target_effect==eff_name`인 버프를 찾아 `coeff *= (1 + mag/100)` 적용. `_STAT_TO_BUFF` 매핑 없음 (`buff` type으로 `_active`에 등록됨) |
 | `atk_buff_mag_pct` | — | ② | ✅ | 특정 named buff(`target_effect`)의 `atk_caster_based_pct` 값 N% ▲. `get_buffs()` 후처리 `atk_caster_based_pct` 루프 안에서 `atk_buff_mag_pct` 버프를 탐색해 `coeff * (1 + N/100)` 배율 적용. `_STAT_TO_BUFF` 매핑 없음 |
+| `received_dmg_buff_mag_pct` | — | ⑥ | ✅ | 특정 named buff(`target_effect`)의 `received_dmg_pct` 값 N% ▲. `atk_buff_mag_pct`와 같은 층이고 곱하는 대상만 다르다 — 적에게 붙은 「받는 대미지 ▲」 디버프의 수치를 `(1 + N/100)`배. 원문 「[효과명] 받는 대미지 증가 **배율**이 N% 증가 상태로 변경」. `target_effect` 필수, `fixed_value`에 N. `get_buffs()` 후처리에서 `_by_stat`으로 증폭 버프를 찾고 `_by_name(target_effect)`의 `received_dmg_pct` 버프 중 **같은 대상에게 걸린 것**만 골라 **증분(`base × N/100`)만** 더한다 — 기본값은 본 루프가 이미 더했으므로, 증폭이 없는 기존 로스터의 합산 순서·부동소수점 결과가 그대로 유지된다. `_STAT_TO_BUFF` 매핑 없음. 엠마 : 택티컬 업 `환경 조성 강화`(환경 조성 3.9% → 7.8%) |
 | `lifesteal_pct` | `lifesteal_pct` | — | ✅ | 대미지 × lifesteal_pct% 만큼 시전자 HP 회복. `event:heal_received` 발생 |
 | `armor_break_dmg_pct` | `armor_break_dmg_pct` | ⑤ | ✅ | `is_armor_break_damage=True` 히트에만 가산. ②에서 적 방어력 0 처리 |
 | `projectile_dmg_pct` | — | — | ❌ | 발사체 대미지 ▲. 미구현 |
@@ -364,8 +374,10 @@ python calculator/damage.py
 | `split_damage` | `is_split=True` | ✅ | |
 | `bonus_damage` | — | ✅ | `timing: "burst_cast"` 시 **3버스트 캐릭터만** `_pending_burst_dmg`에 보류하고 `full_burst_start`에서 계산한다(유저 확인) — 풀버스트는 B3 발동 직후 시작하므로 B3의 추가 대미지만 풀버스트 버프를 받는다. B1/B2는 풀버스트보다 몇 초 앞서 발동하므로 `burst_cast` 시점 버프로 즉시 계산(헬름 : 아쿠아마린 `이지스 캐논 오버로드 2`). 보류된 B3 딜은 계산이 뒤로 밀려 원문 블록 순서가 깨지므로, `_later_burst_cast_buffs()`가 "이 딜보다 **뒤에** 서술된 같은 `burst_cast` buff" 이름을 모아 `get_buffs(exclude_names=...)`로 제외한다 (GAMEPLAY.md §효과 실행 순서. 로산나 `벤데타` ← `벤데타 2` 받는 대미지) |
 | `armor_break_damage` | `is_armor_break_damage=True` | ✅ | ②에서 적 방어력 0 처리 |
+| `armor_break_burst_damage` | `is_armor_break_damage=True` + `is_burst_damage=True` (+ `is_aoe_burst`) | ✅ | 「방어력 무시 **버스트 스킬** 대미지」 복합. 두 플래그를 함께 켜야 ②(적 방어력 0)·⑤(`armor_break_dmg_pct`)·⑧(`burst_dmg`, `all_enemies`면 `burst_dmg_aoe_pct`)이 모두 실린다. `_handle_damage_eff()`의 `base_stat` 비교 세 곳(`is_burst_damage`·`is_aoe_burst`·`is_armor_break_damage`)에 이 stat을 함께 넣는 것이 전부다. 베스티 : 택티컬 업 `미사일 컨테이너 온라인 3` |
 | `first_damage_coeff` (weapon_change 필드) | — | ✅ | stat이 아니라 **`type: "weapon_change"` 항목의 필드**. 원문 `최초 대미지` / `일반 대미지` 2단 계수에서 **모드 진입 첫 발**에만 쓰는 계수(`damage_coeff`는 일반 대미지 쪽). `_tick_weapon_change()`가 레벨 환산해 `_wc_first_coeff`/`_wc_normal_coeff`에 싣고, 발사 직전 `_apply_wc_first_coeff()`가 `_wc_shots == 0`일 때만 첫 계수로 `self.weapon`을 갈아끼운다. **첫 발이 아닐 때 일반 계수로 되돌리는 게 필수** — 연사 24/s + dt 0.05s면 한 tick에 두 발이 나가므로, 되돌리지 않으면 같은 tick의 둘째 발까지 최초 대미지로 나간다. 필드가 없으면 `_wc_first_coeff`가 None이라 기존 동작 그대로. 보유: 라플라스 `라플라스 버스터`(1455.72 vs 22.2 @lv10) |
 | `entry_reload` (weapon_change 필드) | — | ✅ | stat이 아니라 **`type: "weapon_change"` 항목의 필드**. `_tick_weapon_change()` 진입부가 `_wc_new_session`일 때 `_wc_entry_reload_until = t + _reload_duration()`을 잡고 그때까지 빈 리스트를 반환한다 — 재장전이 끝나는 프레임에 `_charge_phase`·`_charge_start_t`를 t로 초기화해 **차지가 재장전 뒤에 시작**하게 만든다(초기화를 빼면 재장전이 공짜가 된다). 필드가 없으면 `_wc_entry_reload_until`이 −1로 남아 기존 동작 그대로. 보유: 드레이크 : 그레이트 빌런 `오버 오버 드라이브` |
+| `max_ammo_scaling_ref` (weapon_change 필드) | — | ✅ | stat이 아니라 **`type: "weapon_change"` 항목의 필드**. 원문 `최대 장탄 수 : N발 X [게이지명/스택명] 개수`처럼 **표기 장탄 자체가 카운터에 비례**할 때, `max_ammo`(=N)에 `ref_count(caster, 이 이름)`을 곱한 값이 모드의 실효 장탄이 된다. 최대 장탄 **버프**(`max_ammo_pct`·오버로드·큐브)와는 다른 층이다 — 그쪽은 `(사용 무기 변경 시 최대 장탄 수 효과 갱신)` 괄호구가 있는 모드만 받고(`max_ammo_buff_applies`), 이 필드는 괄호구와 **무관하게** 표기값을 정한다. 구현은 `timeline._full_ammo()`이고 `max_ammo_buff_applies` 분기보다 **앞**에 선다. 값을 읽는 시점은 다른 장탄과 같아야 하므로 `_wc_ammo_full` 캐시를 그대로 쓴다 — **모드 진입과 재장전 완료뿐**(GAMEPLAY.md §무기 메카닉). `ref_count`가 `None`(그런 이름 없음)이면 배수 1, `0`이면 **0발이 맞다** — `duration_bullets == max_ammo`(모든 탄환 발사 시 제거) 판정이 곱한 뒤 값을 쓰므로 모드가 첫 tick에 스스로 끝난다. 필드가 없으면 종전 동작 그대로. 보유: E.H. `인 투 더 헤븐`(1발 × 사제 탄창 1~4개) |
 | `pierce_damage` | `is_pierce_damage=True` | ✅ | |
 | `projectile_explosion_damage` | `is_projectile_explosion=True` | ✅ | RL 기본 공격에 자동 적용 |
 | `projectile_attachment_damage` | `is_projectile_attachment=True` | ✅ | |
@@ -527,7 +539,7 @@ stat과 직교하는 **값 산정 기준**이다. `stat` 테이블에 없으므�
 | `focusing` | — | ❌ | 미구현. `focus_fire` stat과 연동 필요 |
 | `not_core` | — | ❌ | 미구현. hit_type 연동 필요 |
 | `core_hit_count:1` | — | ❌ | 미구현. timing이 아닌 condition으로 쓰일 때 |
-| `self_state:상태명` | 양쪽 모두 | ✅ | `_has_self_state()` 단일 창구. `_active` 버프 **+ `state["weapon_change"]` 무기 변경 모드명**을 함께 본다 — 모드는 `_active`에 등록되지 않으므로 이걸 빼면 `self_state:저격 모드`류가 영구 거짓이 된다. 나유타 `위선 5/6`(`self_state:기억 연소`), 신데렐라 : 크리스탈 웨이브 `모드 스왑 2`. **상태명이 총칭 `무기 변경`(`WEAPON_CHANGE_STATE`)이면 모드명 대조가 아니라 "아무 모드든 켜져 있는가"로 읽는다** — 원문이 모드 이름 대신 「자신이 무기 변경 상태라면」이라고만 쓰는 경우다(목단 `다 덤벼! 2`. 2026-08-28 이전에는 모드명으로만 대조해 영구 거짓이었고, 고친 뒤 목단 개인 딜 +64%). **상태 이름은 반드시 지속 효과에 붙어야 한다** — instant에만 붙으면 조용히 영구 거짓이 된다(`docs/PARSING.md` §상태의 담체, `doclint` 검사 K) |
+| `self_state:상태명` | 양쪽 모두 | ✅ | `_has_self_state()` 단일 창구. `_active` 버프 **+ `state["weapon_change"]` 무기 변경 모드명**을 함께 본다 — 모드는 `_active`에 등록되지 않으므로 이걸 빼면 `self_state:저격 모드`류가 영구 거짓이 된다. 나유타 `위선 5/6`(`self_state:기억 연소`), 신데렐라 : 크리스탈 웨이브 `모드 스왑 2`. **상태명이 총칭 `무기 변경`(`WEAPON_CHANGE_STATE`)이면 모드명 대조가 아니라 "아무 모드든 켜져 있는가"로 읽는다** — 원문이 모드 이름 대신 「자신이 무기 변경 상태라면」이라고만 쓰는 경우다(목단 `다 덤벼! 2`. 2026-08-28 이전에는 모드명으로만 대조해 영구 거짓이었고, 고친 뒤 목단 개인 딜 +64%). **상태 이름은 반드시 지속 효과에 붙어야 한다** — instant에만 붙으면 조용히 영구 거짓이 된다(`docs/PARSING.md` §상태의 담체, `doclint` 검사 K).<br>**참조되는 버프 자신의 발동 조건은 보지 않는다 — 의도다.** `_by_name`으로 `_active` 멤버십과 `target_chars`만 보고 그 버프의 `trigger.condition`은 읽지 않는다. 조건은 *부여 게이트*이고 `self_state:`는 *마커가 있는가*를 묻는 것이라 층이 다르다. 재평가를 넣으면 ① 밀크 : 블루밍 바니 `부끄러움`은 자기 condition이 `not_self_state:부끄러움`이라 **자기 이름을 봐서** 재귀가 종료하지 않고, ② 프리카 `무대 파트 : 보컬`(민트에게 거는 `duration: -1` 마커, 조건 `self_state:퍼포먼스`)은 `퍼포먼스`가 25초짜리라 원문 「해제 불가」와 반대로 25초 뒤 꺼지며, ③ 소다 : 트윙클링 바니 `시간 연장 I·II`(조건 `self_stack_above:골든 칩:10/20`, `duration: -1`)는 스택이 빠지는 순간 `fullburst_duration` 연장이 도중에 풀린다. **마커의 유효 구간을 좁히려면 조건이 아니라 그 마커의 `duration`을 고칠 것.** 영향 범위(조건부 영구 마커를 참조하는 10건 열거)와 미수정 근거는 `docs/PARSING-CHARS.md` 엠마 : 택티컬 업 스킬1·2 |
 | `not_self_state:상태명` | 양쪽 모두 | ✅ | 위와 같은 창구의 부정. 신데렐라 : 크리스탈 웨이브 `모드 스왑 3` |
 | `target_state:상태명` | 양쪽 모두 | ✅ | 단일 적 가정: `"__enemy__"`가 target_chars에 있는 활성 효과로 확인. **게이지에 쓰지 않는다** — 게이지는 `state["gauges"][caster]`에 살아 `_has_target_state()`에 절대 안 걸린다. `[게이지명] 보유 상태라면`은 `gauge_above:게이지명:1`이다(`PARSING.md` 4-2). 솔린 : 프로스트 티켓 `열차 탑승 도와줄게!`가 `target_state:티켓`이라 영구 거짓이었다(2026-09-05 수정) |
 | `not_target_state:상태명` | 양쪽 모두 | ✅ | `target_state:`의 부정형. `_has_target_state()` 단일 창구를 공유한다. **미구현 시 조용히 항상 통과**하므로(조건 미매칭은 `return True`로 빠진다) 부여 조건으로 쓰면 매 히트 재부여되어 루프가 폭주한다 — 팬텀 구현 전 실측 딜 비중 77%. 팬텀 `예고장`·`괴도의 단검` |
@@ -599,6 +611,7 @@ lazy resolve: 버프 반영 스탯 기준 정렬 필요 target → `_activate()`
 | `"allies_code_excl_self:코드"` | ❌ | ✅ | 자신 제외 해당 코드 아군 전체. `allies_code:`와 별도 분기다 — 메이든 : 아이스 로즈 `블레스 유`·`블레스 유 2`는 아군판/자기판이 배타 분기라 시전자를 빼지 않으면 한쪽이 양쪽을 다 받는다 |
 | `"allies_code_weapon:코드:무기유형"` | ❌ | ✅ | 코드+무기 복합 조건 아군 전체. `_code_weapon()` 헬퍼가 `element_code`·`weapon_type` 동시 필터. 트리나(`전격:AR`) |
 | `"allies_code_weapon_leftmost:코드:무기유형:N"` | ❌ | ✅ | 위 조건을 만족하는 아군 중 **스쿼드 입력 순서 앞 N명**. 고정 속성 기반이라 lazy resolve 불필요. 매칭 0명이면 빈 리스트. 트리나(`전격:AR:1`) |
+| `"allies_squad"` | ❌ | ✅ | **동일 스쿼드**(`parsed_nikke["squad"]` — 앱솔루트·카운터스·이지스 등) 아군 전체. **시전자 포함**이고, 스쿼드가 없는 더미(`test_B*`)는 제외된다 — condition `squad_ally_exists`와 같은 기준의 대상판. 엠마 : 택티컬 업 `포메이션 LT` · 은화 : 택티컬 업 `포메이션 AS`(둘이 서로의 `self_state:` 게이팅을 여는 자리라 대상이 좁아지면 추가 효과 6종이 통째로 죽는다) |
 | `"allies_below_def"` | ✅ | ✅ | `_LAZY_RESOLVE_PREFIXES` 등록됨. 시전자보다 방어력 낮은 아군 전체 |
 | `"allies_burst3"` | ❌ | ✅ | 기본 버스트 단계가 Step 3인 아군 전체. `burst_stages` 기준 |
 | `"allies_top_base_charge_time:N"` | ❌ | ✅ | 기본(버프 제외) 차지 시간이 가장 긴 아군 N기. `parsed_nikke["charge_time"]` 기준 고정 속성이라 lazy resolve 불필요. 차지 무기 아군이 없으면 빈 리스트, 동률이면 스쿼드 입력 순서. 마나 `매터 시그마 4` |

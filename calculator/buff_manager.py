@@ -368,7 +368,8 @@ _RUNTIME_COND_PREFIXES = frozenset([
 ])
 
 
-def _has_runtime_cond(conditions: list, expires: float) -> bool:
+def _has_runtime_cond(conditions: list, expires: float,
+                      duration_bullets: int = -1) -> bool:
     """
     이 버프가 get_buffs 시점마다 조건을 재평가해야 하는지.
 
@@ -380,8 +381,15 @@ def _has_runtime_cond(conditions: list, expires: float) -> bool:
     재평가는 duration -1 / null (지속·영구) 버프에만 적용한다. 그쪽은 만료 시각이
     없으므로 조건이 곧 유효 구간이다 (조건부 passive와 같은 기준 — tick()의
     `ab.expires_at < math.inf: continue` 참고).
+
+    **`[N발 유지]`(`duration_bullets`)도 유한 지속이라 재평가하지 않는다.** 시간이
+    아니라 발수로 끝날 뿐 "발동 시점 게이트 + 정해진 수명"이라는 구조는 `[N초 유지]`와
+    같다 — 남은 한 발을 쏠 때까지는 그 발이 버프를 받아야 한다. 눈금이 초가 아니어서
+    `expires_at`이 `inf`로 남는 탓에 위 게이트를 그냥 통과했고, 그 결과 **자기 상태
+    이름을 `not_self_state:`로 막는 재부여 게이트가 스스로를 꺼 버렸다**
+    (베스티 : 택티컬 업 `미사일 가이드` — 차지 속도 100%·차지 대미지 58.5가 실측 0).
     """
-    if expires != math.inf:
+    if expires != math.inf or duration_bullets != -1:
         return False
     for c in conditions:
         for prefix in _RUNTIME_COND_PREFIXES:
@@ -1081,7 +1089,9 @@ class BuffManager:
                         activated_at=t,
                         expires_at=expires,
                         stack=init_stack,
-                        has_runtime_conditions=_has_runtime_cond(target_eff["trigger"].get("condition", []), expires),
+                        has_runtime_conditions=_has_runtime_cond(
+                            target_eff["trigger"].get("condition", []), expires,
+                            target_eff.get("duration_bullets", -1)),
                         scaling_stack=self._capture_scaling_stack(target_eff, caster),
                     )
                     self._active.append(ab_new)
@@ -2159,7 +2169,9 @@ class BuffManager:
                     self._active.append(ActiveBuff(
                         effect=eff, caster=caster, target_chars=targets,
                         activated_at=t, expires_at=expires, stack=init_stack,
-                        has_runtime_conditions=_has_runtime_cond(eff["trigger"].get("condition", []), expires),
+                        has_runtime_conditions=_has_runtime_cond(
+                            eff["trigger"].get("condition", []), expires,
+                            eff.get("duration_bullets", -1)),
                     ))
                     if self._buff_event_handler and eff.get("name") and targets:
                         for tgt in targets:
@@ -2337,7 +2349,8 @@ class BuffManager:
                 bullets_left=-1 if use_per_target else duration_bullets,
                 bullets_per_target={c: duration_bullets for c in (targets or [])} if use_per_target else {},
                 per_char_stacks={c: 1 for c in (targets or [])} if (use_per_target and max_stack != 1) else {},
-                has_runtime_conditions=_has_runtime_cond(eff["trigger"].get("condition", []), expires),
+                has_runtime_conditions=_has_runtime_cond(
+                    eff["trigger"].get("condition", []), expires, duration_bullets),
                 scaling_stack=self._capture_scaling_stack(eff, caster),
             ))
             name = eff.get("name", "")
@@ -2594,11 +2607,22 @@ class BuffManager:
             eff_name = eff.get("name", "")
             flat = 0.0
             if eff_name:
+                # 조건부 영구 버프는 `_active`에 등록만 되고 게이팅을 런타임 재평가에
+                # 맡긴다(`_RUNTIME_COND_PREFIXES`). 여기서 조건을 안 보면 조건이 거짓인
+                # 주기 단축이 그대로 먹는다 — 엠마 : 택티컬 업 `포메이션 LT 5~7`은
+                # 은화가 없으면 꺼져야 하는데 30초 주기가 10초로 줄어 버린다.
                 flat = sum(
                     (self._get_value(ab.effect, ab, caster) or 0.0)
                     for ab in self._by_stat("effect_interval")
                     if ab.effect.get("target_effect") == eff_name
                     and (ab.target_chars is None or caster in (ab.target_chars or []))
+                    and (
+                        not ab.has_runtime_conditions
+                        or self._runtime_condition_ok(
+                            ab.effect["trigger"].get("condition", []),
+                            ab.caster, caster, caster, t,
+                        )
+                    )
                 )
             interval = max(0.0, base_interval + flat) * max(0.0, 1.0 + cool_pct / 100.0)
             interval = max(interval, base_interval * 0.05)  # 최소 5% cap
@@ -3001,6 +3025,46 @@ class BuffManager:
             parts_src_by_key[bk].append(src)
             buffs[bk] = buffs.get(bk, 0.0) + v
         buffs[_QUANT_PARTS_KEY] = parts_by_key
+
+        # received_dmg_buff_mag_pct: 특정 named buff(`target_effect`)의 「받는 대미지 ▲」
+        # 수치를 (1 + N/100)배. `atk_buff_mag_pct`와 같은 층이고 증폭 대상만 다르다.
+        # 기본값은 위 루프가 이미 더했으므로 여기서는 **증분만** 얹는다 — 그래야 증폭
+        # 버프가 없는 기존 로스터의 합산 순서·부동소수점 결과가 그대로 유지된다.
+        # (엠마 : 택티컬 업 `환경 조성 강화` — 원문 「환경 조성 받는 대미지 증가 배율이
+        #  100% 증가 상태로 변경」. 증폭도, 증폭 대상도 적에게 붙는다)
+        for mag_ab in self._by_stat("received_dmg_buff_mag_pct"):
+            if t >= mag_ab.expires_at:
+                continue
+            ref = mag_ab.effect.get("target_effect")
+            if not ref:
+                continue
+            mag_tgt = (
+                self._resolve_target(mag_ab.effect.get("target", "self"), mag_ab.caster)
+                if mag_ab.target_chars is None else mag_ab.target_chars
+            )
+            if target not in mag_tgt:
+                continue
+            if mag_ab.has_runtime_conditions:
+                mag_conds = mag_ab.effect["trigger"].get("condition", [])
+                if not self._runtime_condition_ok(mag_conds, mag_ab.caster, caster, target, t):
+                    continue
+            mag_val = self._get_value(mag_ab.effect, mag_ab, mag_ab.caster)
+            if mag_val is None:
+                continue
+            for ab in self._by_name(ref):
+                if t >= ab.expires_at or ab.effect.get("stat") != "received_dmg_pct":
+                    continue
+                base_tgt = ab.target_chars if ab.target_chars is not None else self._resolve_lazy(ab)
+                if target not in base_tgt:
+                    continue
+                if ab.has_runtime_conditions:
+                    conds = ab.effect["trigger"].get("condition", [])
+                    if not self._runtime_condition_ok(conds, ab.caster, caster, target, t):
+                        continue
+                base_val = self._get_value(ab.effect, ab, target)
+                if base_val is None:
+                    continue
+                buffs["received_dmg"] = buffs.get("received_dmg", 0.0) + base_val * (mag_val / 100.0)
 
         # atk_from_hp_pct: 최종 최대 HP × (val/100) → atk_flat에 합산
         for ab in self._by_stat("atk_from_hp_pct"):
@@ -3437,6 +3501,17 @@ class BuffManager:
         if target.startswith("allies_class:"):
             cls = target.split(":")[1]
             return [n for n in self.squad_names if _NIKKE[n]["class"] == cls]
+        # "동일 스쿼드 아군 전체" — 소속 스쿼드(`parsed_nikke["squad"]`, 앱솔루트·카운터스
+        # ·이지스 등)가 시전자와 같은 아군. **시전자 포함**이고, 스쿼드가 없는 더미
+        # (`test_B*`)는 빠진다 — condition `squad_ally_exists`와 같은 기준의 대상판이다.
+        # 소속이 없으면 자기 자신만 남는다(빈 리스트가 아니다 — 원문의 "동일 스쿼드"에는
+        # 언제나 자신이 들어간다).
+        if target == "allies_squad":
+            my_squad = _NIKKE.get(caster, {}).get("squad")
+            if not my_squad:
+                return [caster]
+            return [n for n in self.squad_names
+                    if n == caster or _NIKKE.get(n, {}).get("squad") == my_squad]
         # "자신을 제외한 [코드] 아군 전체" — 시전자 포함판(`allies_code:`)과 원문이 갈린다.
         # 메이든 : 아이스 로즈 `블레스 유`는 아군판과 자기판이 배타 분기라, 시전자를 빼지
         # 않으면 MP≥1 사이클에 자기가 양쪽을 다 받는다 (`docs/scenarios/메이든 _ 아이스 로즈.md`)

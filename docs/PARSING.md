@@ -131,6 +131,7 @@ print(json.dumps(data['캐릭터명'], ensure_ascii=False, indent=2))
 | `damage_coeff` | ✅ | weapon_change | 변경 무기 공격 계수. 레벨별이면 `{"1": 65.95, ...}`, 고정이면 float |
 | `first_damage_coeff` | 선택 | weapon_change | 원문이 `최초 대미지` / `일반 대미지`로 계수를 2단으로 적을 때 **모드 진입 첫 발**에만 쓰는 계수. `damage_coeff`에는 `일반 대미지` 쪽을 넣는다. 형식은 `damage_coeff`와 동일(레벨별 dict 또는 float). 생략하면 첫 발도 `damage_coeff`로 계산된다 (라플라스 `라플라스 버스터`) |
 | `max_ammo` | 선택 | weapon_change | 최대 장탄 수. 장탄 수 무한 또는 미명시 시 `-1` |
+| `max_ammo_scaling_ref` | 선택 | weapon_change | 원문이 `최대 장탄 수 : N발 X [게이지명/스택명] 개수`처럼 **표기 장탄을 카운터에 비례**시킬 때 기준이 되는 게이지/스택의 이름. `max_ammo`에는 N(1발분)을 적고 이 필드에 이름을 적는다 — 실효 장탄 = `max_ammo × 카운터 값`. 최대 장탄 **버프**를 받느냐는 별개 축이라 `(사용 무기 변경 시 최대 장탄 수 효과 갱신)` 괄호구가 그대로 가른다 (E.H. `인 투 더 헤븐`) |
 | `reload_time` | 선택 | weapon_change | 재장전 시간(초). 미명시 시 생략 |
 | `core_dmg_mult` | 선택 | weapon_change | 코어 대미지. 미명시 시 생략 |
 | `charge` | 선택 | weapon_change | 변경 무기가 **차지 무기인가**. 무기 유형과 독립된 축이라 `weapon_type`만으로는 못 가른다 — 드레이크 : 그레이트 빌런 `오버 오버 드라이브`가 SG인 채로 차지하는 첫 사례다. 생략하면 `weapon_type`의 무기군 기본값(SR/RL = 차지, AR/SMG/SG/MG = 연사)으로 떨어지므로, **기본값과 어긋날 때만 적는다** |
@@ -267,6 +268,18 @@ template에 timing 키워드 없으면:
 >
 > `[상태명 : 효과]` 콜론 표기는 **그 효과 자체가 상태**라는 뜻이므로 번호 없는 이름이
 > 그쪽으로 간다(그레이브 `[방열 : 재장전 비율 50% ▼]` → 그 buff가 `방열`).
+>
+> **clause가 `not_self_state:[자기 상태명]`으로 재부여를 막으면 담체를 배열 끝에 둔다.**
+> 조건은 clause 단위가 아니라 **효과별로** 평가되므로, 담체가 앞에 있으면 담체가 켜지는
+> 순간 같은 clause 뒤 항목들의 게이트가 닫혀 **영원히 발동하지 않는다.** 에러도 로그도
+> 없이 조용히 빠진다 — 담체만 활성 로그에 남아 얼핏 정상으로 보인다.
+> 담체를 뒤로 미는 것이 딜 계산 순서를 바꾸지 않는 이유는, 이런 clause의 항목들이
+> **같은 프레임에 함께 켜지고 같은 수명으로 함께 꺼지기** 때문이다(GAMEPLAY §효과 실행
+> 순서의 「원문 블록 순서 = 실행 순서」가 가르는 것은 딜과 버프의 선후지 동시에 켜지는
+> 버프끼리가 아니다).
+> 지킨 예: 밀크 : 블루밍 바니 `부끄러움`(담체가 배열 끝, 하위 5개가 앞) ·
+> 아크레인저 블랙 `배터리 긴급 충전` → `변신` · 베스티 : 택티컬 업 `미사일 가이드 2` → `미사일 가이드`.
+> 위반해 잠복해 있던 예: 네온 : 비전 아이 `건강한 몸`(2026-09-10 수정).
 - **캐릭터 전체 파싱 결과에서 `name` 중복 금지.** 같은 이름 생기면 첫 번째는 원래 이름 유지, 두 번째부터 ` 2`, ` 3` suffix (예: `"미사일"`, `"미사일 2"`, `"미사일 3"`). calculator가 `target_effect` 등으로 참조 시 첫 번째 항목 기준.
 
   > **예외 — 같은 이름의 상태를 여러 경로로 부여할 때는 중복시킨다.**
@@ -480,6 +493,7 @@ template에 timing 키워드 없으면:
 | `화력형 아군 전체에게` | `"allies_class:공격"` |
 | `방어형 아군 전체에게` | `"allies_class:방어"` |
 | `지원형 아군 전체에게` | `"allies_class:지원"` |
+| `동일 스쿼드 아군 전체에게` | `"allies_squad"` — 소속 스쿼드(`parsed_nikke["squad"]`) 기준, **시전자 포함**. condition `squad_ally_exists`와 같은 판정의 대상판이다 |
 | `수냉/작열/전격 코드 아군 전체에게` | `"allies_code:수냉"` 등 |
 | `자신을 제외한 수냉/작열/전격 코드 아군 전체에게` | `"allies_code_excl_self:수냉"` 등 — 시전자 포함판과 별도 키다. 원문에 `자신을 제외한`이 있으면 반드시 이쪽 |
 | `전격 코드 소총 아군 전체에게` (코드+무기 복합) | `"allies_code_weapon:전격:AR"` — `코드:무기유형` 순. **`소총` = AR**(SR은 `스나이퍼 라이플`, MG는 `머신건`, SMG는 `기관단총`, SG는 `샷건`, RL은 `로켓 런처`로 각각 별도 표기) |
@@ -594,6 +608,7 @@ template에 timing 키워드 없으면:
 | `effect_interval` | 특정 효과의 발동 간격 N초 ▼ (`target_effect` 필수) |
 | `dmg_scale_mag_pct` | 특정 효과의 대미지 배율 N% ▲ (`target_effect` 필수). 해당 효과의 values를 런타임에 `(1 + N/100)` 배율로 증폭 |
 | `atk_buff_mag_pct` | 특정 named buff의 공격력 증가 배율 N% ▲ (`target_effect` 필수). `target_effect`로 지정된 named buff의 `atk_caster_based_pct` 값을 `(1 + N/100)` 배율로 증폭 |
+| `received_dmg_buff_mag_pct` | 특정 named buff의 **받는 대미지 증가 배율** N% ▲ (`target_effect` 필수). 위와 같은 층이고 증폭 대상만 `received_dmg_pct`다. 텍스트: `[효과명] 받는 대미지 증가 배율이 N% 증가 상태로 변경`. 대미지 계수를 키우는 `dmg_scale_mag_pct`와 구분한다 — 이쪽은 **디버프 수치**를 키운다 |
 | `lifesteal_pct` | 공격 대미지 비례 N% 체력 회복 |
 | `armor_break_dmg_pct` | 방어력 무시 대미지 % ▲ |
 | `projectile_dmg_pct` | 발사체에 가하는 대미지 % ▲ |
@@ -665,6 +680,7 @@ template에 timing 키워드 없으면:
 | `split_damage` | 분배 대미지 |
 | `bonus_damage` | 추가 대미지 |
 | `armor_break_damage` | 방어력 무시 대미지 |
+| `armor_break_burst_damage` | 방어력 무시 **버스트 스킬** 대미지 — 두 축이 한 문구에 겹칠 때만. 「버스트 스킬 대미지」 단독은 `burst_damage`, 「방어력 무시 대미지」 단독은 `armor_break_damage` |
 | `pierce_damage` | 관통 대미지 |
 | `projectile_explosion_damage` | 발사체 폭발 대미지 |
 | `projectile_attachment_damage` | 발사체 부착 대미지 |

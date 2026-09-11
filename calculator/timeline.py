@@ -772,6 +772,12 @@ class CharState:
         # 연사 무기 모드는 진입 시 self.ammo를 모드 장탄으로 덮어쓴다(원래 장탄은 버린다).
         # 모드가 끝날 때 되돌려 놓아야 그 값이 원래 무기로 새어 나가지 않는다.
         self._wc_ammo_borrowed: bool = False
+        # 이번 모드 종료에서 장탄 만탄 복구를 이미 했는가. 종료 경로가 둘이라
+        # (발수 소진 = `_tick_weapon_change` / 지속시간 만료·토글 해제 = `tick`)
+        # 플래그 없이 양쪽에서 채우면 **두 번 채워진다** — 발수 소진으로 끝난 모드의
+        # `event:state_end` 장탄 조작(라플라스 : 얼티밋 히어로 `탄환 100% 제거`)이
+        # 다음 tick의 복구에 덮여 사라지고, 그만큼 재장전이 통째로 없어진다.
+        self._wc_ammo_restored: bool = False
         # `max_ammo_buff_applies` 모드의 실효 최대 장탄. **장탄을 채우는 사건에만 다시 잰다** —
         # 모드 진입과 재장전 완료 두 가지뿐이고, 원문 괄호구가 각 캐릭터에게 의미 있는 쪽을
         # 지목한다(라플라스 : 얼티밋 히어로 `사용 무기 변경 시` — 모드 안에 재장전이 없다 /
@@ -1206,6 +1212,7 @@ class CharState:
                 self._wc_shots = 0
                 self._wc_new_session = True
                 self._wc_ammo_full = None   # 진입 시점에 다시 잰다
+                self._wc_ammo_restored = False
             # ── 컨트롤 실행층 (모드 중) ────────────────────────────────
             # **무기 변경 중에도 엄폐는 된다** (유저 확인, 2026-09-02). 종전에는 이 분기가
             # 컨트롤층보다 위에서 return해 모드가 켜진 동안 조작이 통째로 멈췄다. 시각을
@@ -1255,13 +1262,27 @@ class CharState:
             self._charge_full_t = -1.0
             self._hold_release_t = -1.0
             bm.state.setdefault("charging", {})[self.name] = False
-            if self._wc_ammo_borrowed:
-                # 시한부 연사 모드가 duration으로 끝났다. 진입 시 덮어쓴 모드 장탄
-                # (무한 장탄이면 센티널 999999)이 그대로 남아 원래 무기의 탄창으로
-                # 새어 나가면 모드가 끝난 뒤에도 재장전이 사라진다.
-                # 모드 종료 = 재장전 완료 상태로 본다 (유저 확인). 모더니아 `섬멸 모드`.
+            # 시한부 모드가 duration으로 끝났거나 토글이 풀렸다. **모드가 끝나면 원래 무기는
+            # 만탄으로 돌아온다** (유저 확인 2026-08-08·2026-09-09) — 발사 발수도 지속시간도
+            # 진입 전 잔탄도 보지 않는다. 모드 종료 = 재장전 완료 상태로 본다.
+            # 진입 시 덮어쓴 모드 장탄(무한 장탄이면 센티널 999999)이 그대로 남아 원래 무기의
+            # 탄창으로 새어 나가면 모드가 끝난 뒤에도 재장전이 사라진다. 모더니아 `섬멸 모드`.
+            #
+            # 종전에는 `_wc_ammo_borrowed`(= 연사 모드)일 때만 채웠다 — **차지 모드는 이 경로에서
+            # 잔탄을 그대로 들고 나왔다.** 여기서는 이미 모드가 만료돼(`wc_eff is None`)
+            # `_full_ammo`가 원래 무기 기준을 주므로 그대로 쓴다.
+            #
+            # **발수 소진으로 끝난 모드는 `_tick_weapon_change`가 이미 채웠다** —
+            # 여기서 또 채우면 그때 발생한 `event:state_end`의 장탄 조작을 덮어쓴다.
+            if not self._wc_ammo_restored:
                 self.ammo = self._full_ammo(bm, t)
-                self._wc_ammo_borrowed = False
+                self._wc_ammo_full = None
+                if self.reloading_until > 0 and self._reload_in_weapon_change:
+                    # 모드 안에서 잡힌 재장전은 만탄 복귀로 의미가 없어진다.
+                    self.reloading_until = -1.0
+                    self._reload_in_weapon_change = False
+            self._wc_ammo_borrowed = False
+            self._wc_ammo_restored = False
 
         # 장탄 수 무한이 켜지면 진행 중 재장전은 완료 이벤트 없이 즉시 끊는다.
         # 남은 장탄은 보존하고, 활성 중에는 0발이어도 발사할 수 있다.
@@ -2172,13 +2193,27 @@ class CharState:
             # 원래 무기로 돌아오면 charge_phase를 ready로 초기화
             self._charge_phase = "ready"
             self._wc_entry_reload_until = -1.0
-            if wc_fire_mode in ("auto", "auto_warmup"):
-                # 마지막 발과 같은 tick에 잡힌 변경 무기 재장전 예약은 무효
-                # (변경 무기는 재장전하지 않는다 — 장탄 소진이 곧 모드 종료)
-                self.reloading_until = -1.0
-                self.next_fire_time = t
-            self.ammo = orig_ammo if orig_ammo is not None else self.weapon["max_ammo"]
+            # 마지막 발과 같은 tick에 잡힌 변경 무기 재장전 예약은 무효
+            # (변경 무기는 재장전하지 않는다 — 장탄 소진이 곧 모드 종료).
+            # **연사 모드만이 아니다** — 차지 모드도 모드 안에서 잡힌 재장전을 들고
+            # 나오면 만탄으로 복귀한 직후에 그 재장전이 그대로 돌아간다.
+            self.reloading_until = -1.0
+            self.next_fire_time = t
+            # **모드가 끝나면 원래 무기는 만탄으로 돌아온다** (유저 확인 2026-08-08·2026-09-09).
+            # 발사한 발수도 지속시간도 진입 전 잔탄도 보지 않는다 — `_buffed_ammo`로 그 캐릭터의
+            # **실효** 최대 장탄을 채운다(장비 옵션·큐브·소장품·스킬 버프 반영. `self.weapon`은
+            # 위에서 이미 원래 무기로 원복돼 있다). 여기서 `_full_ammo`를 부르면 안 된다 —
+            # `end_weapon_change`가 아직 아래에 있어 모드가 살아 있고, 그쪽은 **모드 장탄**을 준다.
+            #
+            # 종전에는 `orig_ammo`(진입부에서 잡은 잔탄)로 되돌렸는데, 그 값은 발사가 일어나는
+            # tick에서 `was_ready`가 거짓이라 **모드의 잔탄**으로 잡혔다 → SMG가 1발만 들고
+            # 나와 곧바로 재장전이 삽입됐다. 츠바이·스노우 화이트·맥스웰·E.H.가 모두 그랬다.
+            # `탄환 N% 제거`가 붙은 모드(라플라스 : 얼티밋 히어로·드레이크 : 그레이트 빌런)는
+            # 아래 종료 이벤트가 만탄을 덮어 정상적으로 재장전한다 — 그래서 순서가 이대로여야 한다.
+            self.ammo = self._buffed_ammo(bm, t)
+            self._wc_ammo_full = None
             self._wc_ammo_borrowed = False   # 여기서 이미 원복했다 (tick의 만료 처리와 중복 금지)
+            self._wc_ammo_restored = True    # 〃 — tick 쪽이 덮어쓰지 않도록
             # 장탄 원복이 끝난 뒤에 종료 이벤트를 쏜다 — event:state_end로 발동하는
             # 장탄 조작 효과(라플라스 `탄환 100% 제거`)가 원복에 덮이지 않도록.
             bm.end_weapon_change(self.name, t)
@@ -2681,6 +2716,20 @@ class CharState:
         if wc_eff is not None:
             wc_max = wc_eff.get("max_ammo", -1)
             if wc_max != -1:
+                # 원문 `최대 장탄 수 : N발 X [게이지/스택] 개수`. **표기 장탄 자체가 카운터에
+                # 비례**하므로 장탄 *버프*와는 다른 층이고, `max_ammo_buff_applies`(괄호구)와
+                # 무관하게 곱한다. 값을 다시 재는 시점은 다른 장탄과 같아야 한다 —
+                # `_wc_ammo_full` 캐시를 쓰는 이유가 그것이다(모드 진입·재장전 완료뿐).
+                # 매 tick 재면 종료 조건(`모든 탄환 발사 시`)만 흔들려 탄이 마른 채
+                # 끝나지 않는 모드가 생긴다. (E.H. `인 투 더 헤븐`)
+                ref = wc_eff.get("max_ammo_scaling_ref")
+                if ref:
+                    if self._wc_ammo_full is None:
+                        n = bm.ref_count(self.name, ref)
+                        # None은 "그런 이름이 없다" → 배수 1. 0은 진짜 0이라 0발이 맞다
+                        # (모드가 첫 tick에 `모든 탄환 발사 시`로 스스로 끝난다).
+                        self._wc_ammo_full = int(wc_max) * (1 if n is None else int(n))
+                    return self._wc_ammo_full
                 # `(사용 무기 변경 시 최대 장탄 수 효과 갱신)` 문구가 없으면 표기 장탄 고정.
                 if not wc_eff.get("max_ammo_buff_applies"):
                     return int(wc_max)
@@ -4046,11 +4095,15 @@ def simulate(
             # 파츠 판정은 원문이 파츠를 명시한 스킬(hits_parts)에만 붙는다 — 파츠 보스일 때만
             is_part=(bool(eff.get("hits_parts")) and enm.get("has_parts", False)),
             is_optimal_range=(weapon_type in enm.get("optimal_range_weapons", []) and is_normal),
-            is_burst_damage=(base_stat == "burst_damage"),
+            # 「방어력 무시 버스트 스킬 대미지」는 두 축의 복합이라 플래그를 함께 켠다
+            # (베스티 : 택티컬 업 `미사일 컨테이너 온라인 3`)
+            is_burst_damage=(base_stat in ("burst_damage", "armor_break_burst_damage")),
             # 대상 설명이 '적 전체에게'인 버스트 대미지 → burst_dmg_aoe_pct 수혜
-            is_aoe_burst=(base_stat == "burst_damage" and target_field == "all_enemies"),
+            is_aoe_burst=(base_stat in ("burst_damage", "armor_break_burst_damage")
+                          and target_field == "all_enemies"),
             is_pierce_damage=(base_stat == "pierce_damage"),
-            is_armor_break_damage=(base_stat == "armor_break_damage"),
+            is_armor_break_damage=(base_stat in ("armor_break_damage",
+                                                 "armor_break_burst_damage")),
             is_dot=(base_stat == "dot_damage"),
             is_projectile_explosion=(base_stat == "projectile_explosion_damage"
                                      or (is_normal and cs.base_weapon_type == "RL")),
