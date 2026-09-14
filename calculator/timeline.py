@@ -20,6 +20,9 @@ import random
 from typing import Any
 
 from .base_stat import calc_base_stats
+from .boss_pattern import (
+    DEFAULT_BOSS_ATK, AttackHit, BossScript, validate as validate_boss_patterns,
+)
 from .buff_manager import (
     BuffManager, _QUANT_PARTS_KEY, _get_skill_lv,
     BURST_GAUGE_EXCEPTIONS,
@@ -38,6 +41,7 @@ from .sim_result import (
     ControlLogEntry,
     SimLog,
     SimResult,
+    SquadHitEntry,
 )
 
 _DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
@@ -532,6 +536,10 @@ DEFAULT_CONFIG: dict = {
     #   "expected" — 확률 대신 기대값을 태워 결과를 결정론적으로 만든다.
     #                시드·반복 평균 없이 1회 실행으로 기대딜이 나온다.
     "rng_mode":           "random",
+    # 엄폐물 체력 — **임의값이다.** CDN roledata·테이블에 엄폐물 체력이 없다(2026-09-14 확인).
+    # 보스 공격 패턴(`enemy["patterns"]`의 attack)이 있을 때만 쓰인다. 큐브·소장품의
+    # 엄폐물 체력 증가 옵션은 아직 반영하지 않는다.
+    "cover_hp":           2000000.0,
 }
 
 DEFAULT_ENEMY: dict = {
@@ -540,7 +548,16 @@ DEFAULT_ENEMY: dict = {
     "core_px":              0,    # 코어 직경(px). 0이면 코어 없음, >0이면 코어히트율 확률 계산
     "has_parts":            False,# 파괴 가능 파츠 보유 보스. part_hit_count / part_dmg_pct의 전제
     "optimal_range_weapons": [],  # 적정거리 적용 무기군 목록 e.g. ["SG", "SMG"]
+    # 보스 공격력 — attack 패턴의 피해 산정에만 쓴다. **임의값**(boss_pattern.DEFAULT_BOSS_ATK)
+    "atk":                  DEFAULT_BOSS_ATK,
+    # 보스 패턴 — 위 넷을 시간에 따라 덮어쓰고 딜 게이트·표적을 연다. 포맷의 정본은
+    # `calculator/boss_pattern.py`. **비어 있으면 스케줄러를 만들지 않아** 종전과 한 자리도 같다.
+    "patterns":             [],
 }
+
+# `move` 패턴이 받는 무기군. 정본은 로스터 데이터라 목록을 따로 적지 않는다.
+_WEAPON_TYPES: frozenset[str] = frozenset(
+    v["weapon_type"] for v in _NIKKE.values() if isinstance(v, dict) and v.get("weapon_type"))
 
 
 def _pick(key: str, *sources: dict | None, default=None):
@@ -593,6 +610,21 @@ def _notify_frac(bm, key: str, name: str, frac: float, fire) -> None:
     while acc[k] >= 1.0:
         acc[k] -= 1.0
         fire()
+
+
+def _bullet_core_fracs(core_fracs: list[float], muzzles: int) -> list[float]:
+    """펠릿 단위 코어 확률을 **탄(총구) 단위**로 접는다 — `hit_count` 1회당 1값.
+
+    `not_core` 조건(「명중 시 코어가 아니라면」)이 트리거를 일으킨 그 탄의 코어 여부를
+    읽는데, 명중은 탄 단위이고 코어 판정은 펠릿 단위라 묶음 평균을 넘긴다.
+    펠릿 1이면 히트 하나의 값 그대로다.
+    """
+    per = max(1, len(core_fracs) // max(1, muzzles))
+    out = []
+    for m in range(muzzles):
+        chunk = core_fracs[m * per:(m + 1) * per]
+        out.append(sum(chunk) / len(chunk) if chunk else 0.0)
+    return out
 
 
 # ── CharState (캐릭터별 발사 상태) ────────────────────────────────────────
@@ -1200,6 +1232,9 @@ class CharState:
             self.name, self.enemy_code)
 
     def tick(self, t: float, bm: BuffManager, enemy: dict, cfg: dict) -> list[HitEvent]:
+        # 전투불능: 아무것도 못 한다 (보스 공격 패턴이 있을 때만 생긴다)
+        if bm.is_down(self.name):
+            return []
         # 기절 중: 일반공격 불가
         if bm.is_stunned(self.name):
             return []
@@ -1487,6 +1522,7 @@ class CharState:
         hit_count = split * self.muzzles
 
         expected = cfg.get("rng_mode") == "expected"
+        core_fracs: list[float] = []
         for i in range(hit_count):
             # 히트마다 독립 샘플링 (SG: 10회, 기타: 1회). 기대값 모드는 판정 대신 확률을 넘긴다
             # (P_core가 1이면 판정할 게 없으므로 기대값 모드에서도 코어 히트로 남긴다)
@@ -1524,6 +1560,7 @@ class CharState:
             bm.notify("pellet_hit", t, self.name)
             body_ev = "squad_part_hit" if enemy.get("has_parts", False) else "squad_body_hit"
             core_frac = P_core if expected else (1.0 if is_core else 0.0)
+            core_fracs.append(core_frac)
             _notify_frac(bm, body_ev, self.name, 1.0 - core_frac,
                          lambda: bm.notify_team_hit(body_ev, t, self.name))
             _notify_frac(bm, "crit_hit", self.name, res["crit_frac"],
@@ -1537,8 +1574,9 @@ class CharState:
             bm.mark_normal_attack_landed(self.name)
 
         # 버스트 게이지: 히트 수만큼. 오토 무기라 풀차지 배율이 걸릴 자리가 없다.
-        gauge_buffs = bm.get_buffs(self.name, "__enemy__", t)
-        bm.add_burst_gauge(self._burst_gain(gauge_buffs, hit_count), t, self.name, "weapon")
+        if self._weapon_gauge_lands(bm):
+            gauge_buffs = bm.get_buffs(self.name, "__enemy__", t)
+            bm.add_burst_gauge(self._burst_gain(gauge_buffs, hit_count), t, self.name, "weapon")
 
         # 발사(`on_attack`) → 명중(`hit_count`) 순서다. 쏘고 나서 맞는다는 실제 순서이고,
         # 같은 발에 걸린 「N회 공격 시」 버프가 「N회 명중 시」 딜에 실리는 근거다
@@ -1553,8 +1591,9 @@ class CharState:
         # 않는다(`pellet_hit`이 루프 안에서 따로 센다).
         # 빗나간 탄은 이 루프에서 빠지고 `on_attack`만 남는 것이 분리의 목적이다 —
         # 지금은 미스 모델이 없어 총구 전부가 명중한다. 여기가 그 게이트 자리다.
-        for _ in range(self.muzzles):
-            bm.notify("hit_count", t, self.name)
+        # `core_frac`은 그 탄의 코어 확률 — `not_core` 조건이 읽는다.
+        for bullet_core in _bullet_core_fracs(core_fracs, self.muzzles):
+            bm.notify("hit_count", t, self.name, core_frac=bullet_core)
         if not self._wc_is_skill_damage():
             bm.consume_bullet_buffs(self.name, t)
         if is_last:
@@ -1743,6 +1782,17 @@ class CharState:
 
         return events
 
+    def _weapon_gauge_lands(self, bm: BuffManager) -> bool:
+        """이 무기 사격이 버스트 게이지를 채우는가.
+
+        보스가 사라진 동안(`vanish` 패턴)에는 평타가 빗나가 **평타 몫의 게이지도 안 찬다.**
+        스킬이 채우는 게이지(스킬 대미지 히트·게이지 충전 효과)는 그대로 찬다(유저 확인,
+        2026-09-13) — 그래서 충전 창 전체를 닫지 않고 무기 사격의 가산 자리에서만 거른다.
+        무기 변경 모드의 스킬 대미지 사격은 딜 게이트(`sim_result._is_normal`)가 스킬로 보므로
+        여기서도 스킬로 둔다 — 딜은 들어가는데 게이지만 빠지는 어긋남을 만들지 않는다.
+        """
+        return not (bm.state.get("boss_vanish", False) and not self._wc_is_skill_damage())
+
     def _burst_gain(self, buffs: dict, hit_count: int, full_charge: bool = False,
                     burst_energy: float | None = None) -> float:
         """이번 발사가 만드는 버스트 게이지(%). 충전 창 판정은 하지 않는다.
@@ -1885,8 +1935,8 @@ class CharState:
         bm.notify("on_attack", t, self.name)
         if is_full:
             bm.notify("full_charge_fire", t, self.name)
-        for _ in range(self.muzzles):
-            bm.notify("hit_count", t, self.name)
+        for bullet_core in _bullet_core_fracs(core_fracs, self.muzzles):
+            bm.notify("hit_count", t, self.name, core_frac=bullet_core)
         if is_full:
             for _ in range(self.muzzles):
                 bm.notify("full_charge_hit", t, self.name)
@@ -1899,12 +1949,13 @@ class CharState:
         # 추가로 획득"이 이것이다. 루주 1인 스쿼드 실측이 카메라 有 7발 / 無 18발로
         # 갈리는 것이 근거다(docs/mechanics/버스트 게이지.md).
         # 히트 수는 위 발사 루프가 센 것과 같은 값이다(펠릿 × 총구).
-        gauge_buffs = bm.get_buffs(self.name, "__enemy__", t)
-        bm.add_burst_gauge(
-            self._burst_gain(gauge_buffs, hit_count,
-                             full_charge=(is_full and self.name in bm.state["camera"])),
-            t, self.name,
-            "weapon:full_charge" if is_full else "weapon")
+        if self._weapon_gauge_lands(bm):
+            gauge_buffs = bm.get_buffs(self.name, "__enemy__", t)
+            bm.add_burst_gauge(
+                self._burst_gain(gauge_buffs, hit_count,
+                                 full_charge=(is_full and self.name in bm.state["camera"])),
+                t, self.name,
+                "weapon:full_charge" if is_full else "weapon")
         body_ev = "squad_part_hit" if enemy.get("has_parts", False) else "squad_body_hit"
         # 히트 브로드캐스트는 **펠릿마다** 나간다 (연사 경로와 같다). 발당 1회로 세면
         # 펠릿 15짜리 모드 사격이 팀에게 1히트로 보인다.
@@ -2369,6 +2420,46 @@ class CharState:
         if self.fire_mode == "charge":
             self._charge_phase = "ready"
 
+    def cover_blocked(self, t: float, bm: BuffManager) -> bool:
+        """`cover_disabled`(「특이 사항 : 버스트 스킬 시전 중 엄폐 불가」)가 켜져 있는가.
+
+        켜져 있으면 **엄폐 진입이 막힌다**(유저 결정 2026-09-14) — 정책·명시 시퀀스·전체 엄폐가
+        전부 이 한 곳을 본다. 재장전은 그대로 하지만 엄폐물 뒤가 아니다(`in_cover`).
+        """
+        return bm.has_live_stat(self.name, "cover_disabled", t)
+
+    def in_cover(self, t: float) -> bool:
+        """보스 공격이 엄폐물에 막히는 자세인가.
+
+        엄폐 구간(컨트롤)이거나 **재장전 중**이다 — 재장전은 엄폐해서 한다(GAMEPLAY §컨트롤,
+        자동 재장전도 엄폐물 뒤에서 한다). ⬜ 인게임 미확인: docs/DATA_VERIFY.md.
+        """
+        return (self._cover_until_reload or (self._cover_until > 0 and t < self._cover_until)
+                or self.reloading_until > 0)
+
+    def _reset_action(self, t: float, bm: BuffManager) -> None:
+        """전투불능·부활 공용 — 진행 중인 조작·재장전·차지를 전부 내려놓는다."""
+        self._close_ctrl(t)
+        self._cover_until = -1.0
+        self._cover_until_reload = False
+        self._reload_cancel_after_clip = False
+        self.reloading_until = -1.0
+        self._post_reload_end_t = -1.0
+        if self.fire_mode == "charge":
+            self._charge_phase = "ready"
+        self._charge_full_t = -1.0
+        self._hold_release_t = -1.0
+        bm.state.setdefault("charging", {})[self.name] = False
+
+    def on_down(self, t: float, bm: BuffManager) -> None:
+        self._reset_action(t, bm)
+
+    def on_revive(self, t: float, bm: BuffManager) -> None:
+        """부활 — 만탄으로 바로 싸운다. 밀린 발사를 몰아 쏘지 않는다."""
+        self._reset_action(t, bm)
+        self.ammo = self._full_ammo(bm, t)
+        self.next_fire_time = t
+
     def _pump_ctrl_seq(self, t: float, bm: BuffManager) -> bool:
         """명시 시퀀스 — 정책과 같은 입구로 들어가는 또 하나의 액션 생산자.
 
@@ -2383,7 +2474,12 @@ class CharState:
                 break
             self._ctrl_seq_i += 1
             kind = act.get("action")
-            if kind == "cover":
+            if kind == "cover" and self.cover_blocked(t, bm):
+                # 지정한 조작이 조용히 사라지지 않게 로그에 남긴다
+                if self._sim_log is not None:
+                    self._sim_log.reload_log.append(
+                        ReloadLogEntry(t=t, caster=self.name, event="엄폐 불가(시퀀스 무시)"))
+            elif kind == "cover":
                 self._enter_cover(t, bm, act.get("duration"), "엄폐(시퀀스)",
                                   priority=_PRIO_SEQ)
                 entered = True
@@ -2518,6 +2614,8 @@ class CharState:
         """
         if self.cover_policy != "own_full_burst":
             return None
+        if self.cover_blocked(t, bm):
+            return None
         if not bm.state.get("full_burst", False):
             return None
         if not bm.state.get("burst_casted", {}).get(self.name):
@@ -2567,6 +2665,8 @@ class CharState:
     def _want_reload_cover(self, t: float, bm: BuffManager) -> float | None:
         """장전컨이 지금 열리고 싶은가 — **부작용 없이** 묻는다. 앵커 시각 또는 None."""
         if self.reload_when is None:
+            return None
+        if self.cover_blocked(t, bm):
             return None
         if self.reloading_until > 0 or self._post_reload_end_t > 0:
             return None
@@ -2827,7 +2927,7 @@ class BurstController:
     ):
         self.config = config
         self.char_states = char_states
-        self.enemy_def: int = enemy.get("def", 31784)
+        self._enemy = enemy
         self.squad_names = [c["name"] for c in squad]
 
         # 캐릭터별 기본(고정) 버스트 단계 — 변하지 않음
@@ -2920,6 +3020,13 @@ class BurstController:
 
         # verbose 로그 (simulate에서 주입)
         self._log: SimLog | None = None
+
+    @property
+    def enemy_def(self):
+        """적 방어력. **조회 시점에 읽는다** — 보스 패턴이 방어력을 바꾸는데 `__init__`에서
+        값을 붙들어 두면 버스트 딜만 옛 방어력으로 계산된다. `enemy`는 `simulate()`가 들고
+        도는 같은 dict 객체라 패턴이 없으면 늘 같은 값이다."""
+        return self._enemy.get("def", 31784)
 
     def tick(self, t: float, bm: BuffManager, state: dict) -> list[HitEvent]:
         events: list[HitEvent] = []
@@ -3267,7 +3374,7 @@ class BurstController:
         for name in candidates:
             if t < self.burst_ready_at.get(name, 0.0) - 1e-9:
                 continue
-            if bm.is_stunned(name):
+            if bm.is_stunned(name) or bm.is_down(name):
                 continue
             # **딜레이 버스트** — 이 사람이 차례인데 유저가 아직 안 누른다.
             # 정본: docs/CONTROL.md §L0 · §딜레이 버스트.
@@ -3560,6 +3667,25 @@ def _register_instant_handlers(bm, char_states: dict[str, "CharState"], burst_ct
             hp[name] = max(cur * (1.0 - val / 100.0), 0.0)
             bm.sync_hp(name)
 
+    def handle_cover_heal_pct(eff, caster, t, val):
+        # 엄폐물 최대 체력의 N% 회복. **부서진 엄폐물은 되살아나지 않는다**(유저 확인 — 재생성 없음).
+        cur, mx = bm.state["cover_hp"], bm.state["cover_max_hp"]
+        for name in _resolve_targets(eff, caster):
+            if cur.get(name, 0.0) > 0.0 and val:
+                cur[name] = min(mx[name], cur[name] + mx[name] * val / 100.0)
+
+    def handle_revive(eff, caster, t, val):
+        # `[체력 N%로 부활]` — values가 부활 직후 체력 %다. 값 없는 revive는 데이터 누락이다.
+        if not val:
+            raise ValueError(f"{caster} `{eff.get('name')}`: revive에 체력 % 수치가 없다")
+        for name in _resolve_targets(eff, caster):
+            if not bm.is_down(name):
+                continue
+            bm.revive(name, t, val)
+            char_states[name].on_revive(t, bm)
+            if bm.state.get("_on_revive") is not None:
+                bm.state["_on_revive"](t, name, caster)
+
     def handle_force_reload(eff, caster, t, val):
         target_names = _resolve_targets(eff, caster)
         for name in target_names:
@@ -3576,6 +3702,8 @@ def _register_instant_handlers(bm, char_states: dict[str, "CharState"], burst_ct
     bm.register_instant_handler("heal_hp_pct", handle_heal_hp_pct)
     bm.register_instant_handler("current_hp_reduce", handle_current_hp_reduce)
     bm.register_instant_handler("force_reload", handle_force_reload)
+    bm.register_instant_handler("cover_heal_pct", handle_cover_heal_pct)
+    bm.register_instant_handler("revive", handle_revive)
 
 
 # ── simulate ──────────────────────────────────────────────────────────────
@@ -3713,6 +3841,8 @@ def _pump_squad_seq(t: float, bm: BuffManager, squad: list[dict],
                 # 흔든다). 게다가 그 모드는 tick 순서상 엄폐 검사보다 먼저 처리되어
                 # **엄폐시켜 놓아도 계속 쏜다** — 걸어 두면 로그만 남고 조작은 없다.
                 if cs._in_weapon_change or bm.get_weapon_change(cs.name) is not None:
+                    continue
+                if cs.cover_blocked(t, bm):
                     continue
                 cs._enter_cover(t, bm, act.get("duration"), "엄폐(전체 엄폐)",
                                 ctrl_input="cover_all")
@@ -3866,6 +3996,10 @@ def simulate(
     cfg = {**DEFAULT_CONFIG, **(config or {})}
     enm = {**DEFAULT_ENEMY, **(enemy or {})}
     duration = cfg["duration"]
+    # 보스 패턴은 무거운 초기화보다 먼저 검사한다 — 잘못 적은 스크립트는 즉시 실패시킨다.
+    boss_patterns = (validate_boss_patterns(enm["patterns"], weapon_types=_WEAPON_TYPES,
+                                            squad_size=len(squad))
+                     if enm.get("patterns") else None)
 
     if cfg["rng_mode"] not in ("random", "expected"):
         raise ValueError(f'rng_mode는 "random" 또는 "expected"여야 한다: {cfg["rng_mode"]!r}')
@@ -3903,6 +4037,9 @@ def simulate(
         # 지금이 충전 창인가. BurstController.tick()이 매 프레임 `_phase == "idle"`로 갱신한다.
         # 전투 시작 시점은 idle이므로 True에서 출발한다.
         "burst_gauge_charging": True,
+        # 보스가 사라졌는가(`vanish` 패턴). 보스 스케줄러가 프레임 맨 앞에서 갱신한다 —
+        # 무기 사격이 게이지를 채울지를 `CharState._weapon_gauge_lands()`가 이것으로 판정한다.
+        "boss_vanish":  False,
         # 조작자(카메라)는 한 명 — `_arbitrate_control()`이 매 프레임 갱신한다.
         # 정본: docs/CONTROL.md §조작자는 한 명.
         "ctrl_mode":    cfg["control_mode"],
@@ -3915,6 +4052,12 @@ def simulate(
         # 카메라가 보고 있는 니케 집합. 조작이 있으면 주인을 따라가고, 없으면 정적 유도값이다
         # (`_resolve_cameras()`). 풀차지 게이지 배율이 이 집합에만 붙는다.
         "camera":       cfg["_camera"],
+        # 전투불능 니케. 보스 공격 패턴이 없으면 늘 비어 있다 — 비어 있는 동안은 대상 해석·발동
+        # 게이트가 전부 종전과 같은 경로다.
+        "down":         set(),
+        # 엄폐물 체력. 보스 공격이 엄폐 중인 니케 대신 깎는다. 부서지면 재생성되지 않는다.
+        "cover_max_hp": {c["name"]: float(cfg["cover_hp"]) for c in squad},
+        "cover_hp":     {c["name"]: float(cfg["cover_hp"]) for c in squad},
         "hp_pct":       {c["name"]: 100.0 for c in squad},
         "hp":           {c["name"]: float(base_stats[c["name"]]["hp"]) for c in squad},
         "base_stats":   base_stats,
@@ -3950,6 +4093,20 @@ def simulate(
     bm = BuffManager(squad, state)
     burst_ctrl = BurstController(squad, cfg, char_states, enm)
     _register_instant_handlers(bm, char_states, burst_ctrl)
+
+    # 보스 패턴 스케줄러. 없으면 None이고, 아래 모든 보스 자리가 그대로 건너뛴다.
+    boss: BossScript | None = None
+    if boss_patterns:
+        def _superior(caster: str, code: str) -> bool:
+            # 속성보호막 통과 — 로스터 코드 상성이거나 `element_code_override` 버프로 그 코드에
+            # 우월해졌거나. 인게임이 후자도 인정하고, 버프라 조회 시점에 봐야 한다.
+            return (is_element_match(_NIKKE[caster].get("element_code", ""), code)
+                    or bm.element_override_match(caster, code))
+        boss = BossScript(boss_patterns, enm, _superior)
+        # 보스 공격의 무작위 대상은 **자기 난수열**을 쓴다 — 전역 `random`을 같이 쓰면 공격
+        # 하나를 넣는 것만으로 크리·코어 판정 순서가 통째로 밀린다.
+        boss_rng = random.Random(seed) if seed is not None else random.Random()
+        state["_on_revive"] = lambda t, name, by: boss.log_squad(t, "", "revive", f"{name} ← {by}")
 
     sim_log = SimLog() if verbose else None
     burst_ctrl._log = sim_log
@@ -4217,6 +4374,110 @@ def simulate(
         bm.sync_hp(ev.caster)
         bm.notify("event:heal_received", t, ev.caster)
 
+    def _land(ev: HitEvent, t: float) -> None:
+        """히트 하나를 결과에 넣는다. 보스 게이트(사라짐·속성보호막)에 막히면 아무 데도 안 남는다
+        — 딜도, 흡혈도, 표적 체력도. 표적 흡수는 게이트를 지난 뒤 `admit()` 안에서 한다."""
+        if boss is not None and not boss.admit(ev, t):
+            return
+        result.hits.append(ev)
+        result.char_total[ev.caster] += ev.damage
+        _apply_lifesteal(ev, bm, base_stats, t)
+
+    squad_order = [c["name"] for c in squad]
+
+    def _attack_targets(spec, t: float) -> list[str]:
+        """이 발이 누구를 때리나. 정본: boss_pattern.py §공격.
+
+        - all · slot — 정해진 자리를 친다. 도발·은신과 무관하다.
+        - random:N · top_atk:N — 고르는 공격이라 **도발 중인 니케가 먼저 자리를 가져가고**,
+          남은 자리를 은신이 아닌 산 니케에서 규칙대로 채운다. 전원이 은신이면 은신을 무시한다.
+          ⬜ 인게임 미확인(docs/DATA_VERIFY.md).
+        """
+        alive = bm._alive()
+        if spec.rule == "all":
+            return alive
+        if spec.rule == "slot":
+            return [squad_order[i] for i in spec.slots if squad_order[i] in alive]
+        taunt = bm.taunters(t)[:spec.n]
+        rest = [n for n in alive if n not in taunt]
+        pool = [n for n in rest if not bm.has_live_stat(n, "stealth", t)] or rest
+        need = spec.n - len(taunt)
+        if need <= 0 or not pool:
+            return taunt
+        if spec.rule == "random":
+            picked = boss_rng.sample(pool, min(need, len(pool)))
+        else:
+            picked = sorted(pool, key=bm._effective_atk, reverse=True)[:need]
+        return taunt + [n for n in squad_order if n in picked]
+
+    def _boss_attack(hit: AttackHit, t: float) -> None:
+        """보스 공격 한 발을 대상마다 층에 나눠 넣는다.
+
+        피해 = max((보스 공격력 − 니케 최종 방어력) × 계수% × (100% + 받는 피해 증감%), 1)
+        — 니케가 적을 때리는 식(damage.py ②·①·⑥)과 같은 모양이다(유저 결정). 크리는 없다.
+
+        층 (유저 확인):
+          비관통 — 맨 앞 한 층만 받는다. 보호막 → (엄폐 중이고 엄폐물이 살아 있으면) 엄폐물 → 체력.
+                   **앞 층이 깨져도 남은 피해는 넘어가지 않는다.**
+          관통   — 보호막·(엄폐 중이면) 엄폐물·체력이 **같은 피해를 각각** 받는다.
+        엄폐물이 부서졌으면 엄폐해도 막아 주지 않는다. 무적은 체력 피해만 0으로 한다 —
+        피격 이벤트는 그대로 나간다(⬜ 인게임 미확인, docs/DATA_VERIFY.md).
+        """
+        spec = hit.spec
+        atk = spec.atk if spec.atk is not None else float(enm.get("atk", DEFAULT_BOSS_ATK))
+        for name in _attack_targets(spec, t):
+            if bm.is_down(name):
+                continue
+            cs = char_states[name]
+            dmg = (max(atk - bm._effective_def(name), 0.0) * spec.coeff / 100.0
+                   * max(0.0, 1.0 + bm.incoming_dmg_pct(name, t) / 100.0))
+            dmg = max(dmg, 1.0)
+            # 엄폐 불가(`cover_disabled`)면 재장전 중이어도 엄폐물 뒤가 아니다
+            covered = (cs.in_cover(t) and state["cover_hp"][name] > 0.0
+                       and not cs.cover_blocked(t, bm))
+            shield = bm.absorb_shield(name, dmg, t)
+            cover = 0.0
+            if spec.pierce or shield <= 0.0:
+                if covered:
+                    cover = min(state["cover_hp"][name], dmg)
+                    state["cover_hp"][name] -= cover
+                    if state["cover_hp"][name] <= 0.0:
+                        state["cover_hp"][name] = 0.0
+                        boss.log_squad(t, hit.pattern, "cover_break", name)
+            to_hp = dmg if (spec.pierce or (shield <= 0.0 and cover <= 0.0)) else 0.0
+            if to_hp and bm.has_live_stat(name, "invincible", t):
+                to_hp = 0.0
+            # **체력이 0에 닿은 발은 곧바로 전투불능이다.** 임계 이벤트(`hp_below:T`)를 쏘지 않는다 —
+            # 쏘면 「체력 20% 이하 도달 시 최대 체력 ▲」(목단 `근성`)가 이미 0이 된 체력을 되살린다.
+            fell = bool(to_hp) and state["hp"][name] - to_hp <= 0.0
+            if to_hp:
+                state["hp"][name] = max(0.0, state["hp"][name] - to_hp)
+                if not fell:
+                    bm.sync_hp(name)
+            bm.notify("received_hit", t, name)
+            if cover:
+                bm.notify("event:cover_hit", t, name)
+            fell = fell and not bm.is_down(name)
+            if fell:
+                state["hp"][name] = 0.0     # 피격 트리거의 회복이 끼어들었어도 쓰러진 발이다
+            boss.note_attack(hit.pattern, to_hp)
+            result.squad_hits.append(SquadHitEntry(
+                t=t, pattern=hit.pattern, target=name, damage=dmg, pierce=spec.pierce,
+                shield=shield, cover=cover, hp=to_hp, hp_after=state["hp"][name], down=fell))
+            if fell:
+                bm.knock_down(name, t)
+                cs.on_down(t, bm)
+                boss.log_squad(t, hit.pattern, "down", name)
+                bm.notify_down(name, t)     # 정리가 끝난 뒤 — 부활이 여기서 나올 수 있다
+
+    # 보스 상태는 전투 시작 효과보다도 먼저 정한다 — t=0 프레임의 누구도 기본 상태를 읽으면
+    # 안 된다(`core_hit` 조건의 전투 시작 버프 등). 이때 나온 이벤트는 루프 첫 프레임의
+    # 통지 자리에서 나간다. 루프의 t=0 호출은 전이가 이미 끝나 있어 아무것도 안 한다.
+    _boss_events: list[str] = []
+    if boss is not None:
+        _boss_events += boss.begin_frame(0.0, enm)
+        state["boss_vanish"] = boss.vanished
+
     bm.battle_start(0.0)
 
     # battle_start 버프 적용 후 장탄을 실제 max_ammo로 초기화
@@ -4234,6 +4495,12 @@ def simulate(
 
     t = 0.0
     while t <= duration:
+        # 보스 상태 확정 — 맨 앞. 이 프레임의 누구도 읽기 전에 코어·방어력·적정거리·사라짐이
+        # 정해져야 한다.
+        if boss is not None:
+            _boss_events += boss.begin_frame(t, enm)
+            state["boss_vanish"] = boss.vanished
+
         bm.tick(t)
 
         if t >= _next_part_break:
@@ -4241,16 +4508,27 @@ def simulate(
                 bm.notify("event:part_destroy", t, char["name"])
             _next_part_break += _part_break_interval
 
+        # 보스 이벤트 — 파츠 파괴 주기와 **같은 자리**라 두 발생원이 같은 규약이 된다.
+        # `bm.tick` 뒤인 이유도 같다: 만료 정리보다 앞서 버프를 붙이면 같은 프레임에 지워질 수 있다.
+        if _boss_events:
+            for ev_name in _boss_events:
+                for char in squad:
+                    bm.notify(ev_name, t, char["name"])
+            _boss_events.clear()
+
+        # 보스 공격 — 통지 자리 바로 뒤. 피격이 낳는 버프(`received_hit_count` 등)도 만료 정리가
+        # 끝난 뒤에 붙어야 같은 프레임에 지워지지 않는다.
+        if boss is not None and boss.attacks:
+            for _hit in boss.attacks:
+                _boss_attack(_hit, t)
+            boss.attacks.clear()
+
         for ev in _dot_events:
-            result.hits.append(ev)
-            result.char_total[ev.caster] += ev.damage
-            _apply_lifesteal(ev, bm, base_stats, t)
+            _land(ev, t)
         _dot_events.clear()
 
         for ev in burst_ctrl.tick(t, bm, state):
-            result.hits.append(ev)
-            result.char_total[ev.caster] += ev.damage
-            _apply_lifesteal(ev, bm, base_stats, t)
+            _land(ev, t)
 
         # 스쿼드 시퀀스 → 조작자(카메라) 결정 → 캐릭터. 순서의 근거는
         # docs/CONTROL.md §판정 자리 (틱 내 순서에 답이 달라지지 않게 한다).
@@ -4258,11 +4536,8 @@ def simulate(
         _arbitrate_control(t, bm, squad, char_states, cfg["_camera"])
 
         for char in squad:
-            name = char["name"]
-            for ev in char_states[name].tick(t, bm, enm, cfg):
-                result.hits.append(ev)
-                result.char_total[name] += ev.damage
-                _apply_lifesteal(ev, bm, base_stats, t)
+            for ev in char_states[char["name"]].tick(t, bm, enm, cfg):
+                _land(ev, t)
 
         t += DT
 
@@ -4278,10 +4553,14 @@ def simulate(
     # 채운 몫은 다음 프레임이 없어 수거되지 못한 채 사라진다(손실은 duration 대비
     # 미미하지만 경로는 확실하다) — 여기서 마저 비운다.
     for ev in _dot_events:
-        result.hits.append(ev)
-        result.char_total[ev.caster] += ev.damage
-        _apply_lifesteal(ev, bm, base_stats, duration)
+        _land(ev, duration)
     _dot_events.clear()
+
+    if boss is not None:
+        boss.finish(duration)
+        result.boss_log = boss.log
+        result.boss_score = boss.score
+        result.boss_unmodeled = list(boss.unmodeled)
 
     result.squad_total = sum(result.char_total.values())
     result.hits.sort(key=lambda e: e.t)

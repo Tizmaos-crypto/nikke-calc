@@ -71,17 +71,80 @@ CDN roledata의 `character_level_{attack,defence,hp}_list`에서 다시 만든�
 
 ```
 for t in 0, DT, 2·DT, ..., duration:
+  boss.begin_frame(t, enemy)          ← 보스 패턴이 있을 때만. 전이 확정 → 적 상태 기록
   bm.tick(t)                          ← 주기 대미지 → 만료 버프 제거 → every:Ns 쿨타임
+  보스 이벤트 notify                   ← `part_break_interval`의 `event:part_destroy`와 같은 자리
+  보스 공격 (_boss_attack)             ← 이 프레임에 나가는 attack 발. 층·피격 이벤트·전투불능
   _dot_events 배출                     ← bm.tick이 낳은 damage 효과의 히트를 여기서 수확
   burst_ctrl.tick(t, bm, state)       ← 버스트 사이클 관리 (버스트 딜도 히트로 나온다)
   for each CharState:
     hits = cs.tick(t, bm, enemy, cfg) ← 발사/차지/재장전 처리
-  (히트마다 result.hits 누적 + char_total 가산 + 흡혈 처리)
+  (히트마다 _land(): 보스 게이트 → 표적 흡수 → result.hits 누적 + char_total 가산 + 흡혈)
 ```
 
 **한 프레임 안의 이 순서가 곧 명세다.** `bm.tick`이 만료 정리보다 주기 대미지를 먼저
 처리하는 것, DoT 히트를 버스트·발사보다 앞에서 수확하는 것 모두 결과를 바꾼다 —
 스냅샷 L3(순서)가 지키는 대상이 이것이다.
+
+### 보스 패턴 (`enemy["patterns"]`)
+
+보스를 스칼라 셋이 아니라 시간에 따라 이어지는 패턴들로 적는 자리다. **포맷·검사 규칙의
+정본은 `calculator/boss_pattern.py` 모듈 docstring**이고, 여기는 루프에 끼는 자리만 적는다.
+
+- **패턴이 비면 `BossScript`를 만들지 않는다.** 루프의 보스 자리가 전부 `boss is None`으로
+  건너뛰어 이 기능 이전과 계산이 한 자리도 같다. 하네스 baseline이 전부 이 경로다.
+- 패턴이 바꾸는 적 상태는 `def`·`core_px`·`has_parts`·`optimal_range_weapons` 넷뿐이다
+  (`boss_pattern.OVERLAY_FIELDS`). 사격·조건 판정이 매번 같은 `enemy` dict를 다시 읽으므로
+  dict를 갈아끼우지 않고 **값만 바꾼다.** `BurstController.enemy_def`가 조회 시점에 읽는
+  property인 것도 그래서다 — 캐시하면 버스트 딜만 옛 방어력으로 계산된다.
+- **t=0의 상태 확정은 `bm.battle_start()`보다 앞이다.** 전투 시작 효과도 기본 상태를 읽으면
+  안 된다. 그때 나온 이벤트는 루프 첫 프레임의 통지 자리에서 나간다.
+- **딜 게이트는 결과 자리에 있다**(`_land()` → `BossScript.admit()`). 사라짐은 평타
+  (`sim_result._is_normal`)만 빼고, 속성보호막은 캐스터 단위로 로스터 코드 상성이거나
+  `element_code_override` 버프로 우월할 때만 통과시킨다. **거른 뒤에 표적에 흡수**하므로 막힌
+  딜은 표적도 못 깎는다. 발사 시점에 이미 나간 트리거(`hit_count`·`core_hit` …)는 되돌리지 않는다.
+- **사라짐은 평타 몫의 버스트 게이지만 뺀다.** 충전 창(`burst_gauge_charging`)은 건드리지 않고
+  `CharState._weapon_gauge_lands()`가 무기 사격의 가산 자리에서만 거른다 — 스킬 게이지는
+  사라진 동안에도 찬다(`docs/mechanics/버스트 게이지.md`).
+- 표적 파괴 이벤트(`emit_on_destroy`)는 흡수 자리에서 바로 쏘지 않고 **다음 프레임 통지
+  자리**에서 나간다. `_dot_events`를 다음 프레임 시작에 수거하는 것과 같은 1프레임 규약이다.
+- `config["part_break_interval"]`과 표적 파괴는 서로 독립이다. 둘 다 켜면
+  `event:part_destroy`가 양쪽에서 나간다.
+
+#### 보스 공격 (`attack` 패턴 → `timeline._boss_attack`)
+
+`BossScript`는 「언제 몇 발이 어떤 대상 규칙으로 나가는가」까지만 알고(`boss.attacks`), 대상·피해·
+층은 니케 상태가 있는 timeline이 정한다. 자리는 **통지 자리 바로 뒤**다 — 피격이 낳는 버프가 만료
+정리 뒤에 붙어야 같은 프레임에 지워지지 않는다.
+
+- **대상** (`_attack_targets`): `all`·`slot:` 공격은 정해진 자리를 친다. `random:N`·`top_atk:N`은
+  **도발 중인 니케가 자리를 먼저 가져가고**(`bm.taunters()`) 남은 자리를 은신이 아닌 산 니케에서
+  채운다(전원 은신이면 은신 무시). 무작위는 보스 전용 `random.Random(seed)`을 쓴다 — 전역 난수를
+  같이 쓰면 공격 하나로 크리 판정 순서가 통째로 밀린다.
+- **피해** = `max((보스 공격력 − 니케 최종 방어력) × 계수% × (100% + 받는 피해 증감%), 1)` — 니케가
+  적을 때리는 식과 같은 모양이다(유저 결정). 크리 없음. 보스 공격력 `enemy["atk"]`와 엄폐물 체력
+  `config["cover_hp"]`은 **임의값**이다(데이터가 없다).
+- **층** (유저 확인):
+
+  | | 보호막 | 엄폐물 (엄폐 중·엄폐물 생존) | 체력 |
+  |---|---|---|---|
+  | 비관통 | 있으면 이 층만 받는다 | 보호막이 없을 때만 받는다 | 앞 두 층이 없을 때만 |
+  | 관통 | 같은 피해를 받는다 | 같은 피해를 받는다 | 같은 피해를 받는다 |
+
+  **비관통은 앞 층이 깨져도 남은 피해가 넘어가지 않는다.** 보호막이 여럿이면 먼저 걸린 하나만
+  맞는다. 엄폐물이 부서지면 엄폐해도 막아 주지 않고 재생성되지 않는다. 「엄폐 중」은 엄폐 구간이거나
+  재장전 중이다(`CharState.in_cover`) — `cover_disabled`가 켜져 있으면 둘 다 아니다. 무적은
+  체력 피해만 0으로 한다.
+- **이벤트 순서**: 체력 반영 → `sync_hp`(임계 이벤트) → `received_hit` → `event:cover_hit` →
+  전투불능 판정. **체력이 0에 닿은 발은 임계 이벤트를 쏘지 않고** 곧바로 전투불능이다.
+- **전투불능** (`bm.knock_down` → `CharState.on_down` → 로그 → `bm.notify_down`): 유한 지속 버프
+  중 그 니케가 **받은** 것만 사라지고(`persist_on_revive` 제외) 준 버프는 남는다. 영구 버프는 다시
+  붙일 계기가 없어 남겨 둔다. 쓰러진 동안은 사격·스킬 발동(`_notify` 게이트, `event:self_down`만
+  예외)·버스트 후보·아군 대상 해석에서 전부 빠진다. `event:self_down`·`event:ally_down`은 **정리가
+  끝난 뒤에** 나간다 — 같은 호출 안에서 부활이 나오면 뒤늦은 정리가 부활한 니케를 도로 멈춰 세운다.
+- **부활** (`revive` → `bm.revive` → `CharState.on_revive`): 만탄으로 바로 싸우고 버스트 쿨은 이어간다.
+- 결과는 `SimResult.squad_hits`(발 단위 층별 피해)와 `boss_log`의 `down`·`revive`·`cover_break`.
+  인게임 미확인 판단은 `docs/DATA_VERIFY.md` §보스 → 니케 피해.
 
 ---
 
@@ -214,7 +277,7 @@ _fire()
   │    bm.notify("pellet_hit" / "crit_hit" / "core_hit") · notify_team_hit(body/part)
   │    → HitEvent 생성
   ├─ bm.notify("on_attack", t, name)               ← 발사: 발사 1회당 1회
-  ├─ for _ in range(muzzles): bm.notify("hit_count")  ← 명중: 탄 단위(총구 수만큼)
+  ├─ for 탄 in muzzles: bm.notify("hit_count", core_frac=그 탄의 코어 확률)  ← 명중: 탄 단위. `not_core`가 읽는다
   ├─ bm.consume_bullet_buffs(name, t)
   └─ for _ in range(muzzles): bm.notify("last_bullet") if last bullet
 ```
@@ -373,7 +436,12 @@ SimLog            — verbose=True 시 버스트·버프스냅샷·재장전 이
 SimResult
   ├─ hits: list[HitEvent]
   ├─ char_total: dict[이름 → 딜]     (필드다. squad_total은 이것의 합)
+  ├─ boss_log: list[BossLogEntry]   (보스 패턴 시작·종료·표적 파괴. verbose와 무관하게 채운다)
+  ├─ boss_score                     (표적 파괴 점수 합. squad_total에 들어가지 않는다)
+  ├─ boss_unmodeled                 (구간만 차지하고 효과 모델이 없던 예약 패턴 id — summon·debuff)
+  ├─ squad_hits: list[SquadHitEntry] (보스 공격 발 × 대상 — 보호막·엄폐물·체력이 받은 양, 전투불능)
   ├─ summary()                      → 스쿼드 총딜 요약 출력
+  ├─ boss_summary()                 → 보스 패턴 흐름 출력
   └─ hit_summary()                  → hit_tag별 히트 집계
 
 모듈 함수 (SimResult의 메서드가 아니다)
@@ -389,6 +457,7 @@ SimResult
 ```
 timeline.py
   ├── base_stat.py      (초기화 시 1회)
+  ├── boss_pattern.py   (enemy["patterns"]가 있을 때만 — 매 프레임 begin_frame / 히트마다 admit)
   ├── buff_manager.py   (매 프레임 notify / get_buffs / tick)
   ├── damage.py         (매 발사마다 calc_damage)
   └── sim_result.py     (HitEvent 생성 및 SimResult 반환)
@@ -398,6 +467,10 @@ buff_manager.py
 
 base_stat.py
   └── data/base_stat_tables/
+
+boss_pattern.py
+  ├── damage.py         (코드 상성 목록)
+  └── sim_result.py     (평타 판정 · BossLogEntry)
 
 damage.py              (외부 의존 없음 — 순수 계산)
 sim_result.py          (외부 의존 없음 — 자료구조만)
