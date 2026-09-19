@@ -147,10 +147,13 @@ if eff.get("stat") == "새_stat_caster_based_pct":
 
 - 보호막을 받은 각 대상에게 `event:shield_applied`를 통지한다.
 - `during_shield`는 해당 캐릭터에게 유효한 보호막이 하나 이상 있는지 판정한다.
-- 보스 공격은 `bm.absorb_shield()`로 **먼저 걸린 보호막 하나**를 깎는다. 비관통 한 발은 보호막이
-  깨져도 남은 피해가 넘어가지 않는다. 다 깎이면 그 대상에게 `event:shield_consumed`.
+- 보스 공격은 `bm.absorb_shield()`로 보호막을 깎는다. 보호막은 각자 따로 작동한다 — 비관통은
+  **나중에 생긴 보호막 하나**만 맞고(순서는 잠정, `docs/DATA_VERIFY.md`) 그 보호막이 깨져도 남은
+  피해가 넘어가지 않는다. 관통은 **살아 있는 보호막 전부**가 같은 피해를 받는다. 다 깎인 보호막마다
+  그 대상에게 `event:shield_consumed`.
   층 규칙의 정본은 `docs/CALCULATOR.md` §보스 패턴.
-- `shield_restore_pct`는 미구현이다.
+- `shield_restore_pct`는 미구현이다(로스터 사용처 없음).
+- `next_shield_hp_pct`(다음 보호막 체력 ▲)는 보호막이 적용되는 순간 대상별로 생성량을 키우고 소모된다.
 
 ---
 
@@ -190,6 +193,20 @@ if timing.startswith("new_event:") and event == "new_event":
 > (베스티 : 택티컬 업 `미사일 가이드` — 차지 속도 100%·차지 대미지 58.5가 실측 0이었다).
 > 소급 영향은 팬텀 `괴도의 예고장`(`[1발 유지]` + `target_state:예고장`) 하나로,
 > 예고장을 지우는 그 발이 이제 버프를 정상적으로 받는다.
+
+> **조건부 `passive`는 지속시간에 따라 수명 관리가 갈린다** (`_is_cond_finite_passive`,
+> 2026-09-15). `passive`는 `battle_start`에 **한 번만** 등록되므로(`_timing_match`):
+> - **무한 지속(`-1`)** — 조건과 무관하게 등록하고(`suppress_event`로 로그만 억제)
+>   게이팅을 런타임 재평가에 전적으로 맡긴다. 조건이 곧 유효 구간이다.
+> - **유한 지속(`[N초 유지]`)** — 위 재평가 대상이 **아니므로**(`expires_at != inf`) 같은 방식을
+>   쓸 수 없다. 두 가지가 동시에 깨져 있었다: 조건이 거짓인데도 등록돼 **수치가 그대로 먹었고**,
+>   한 번 만료되면 조건이 참이 되어도 **되살아날 경로가 없었다**. 그래서 이 부류는
+>   ① 조건이 거짓이면 등록하지 않고 ② `tick()`이 조건이 참인 동안 만료 시각을 민다
+>   ③ 거짓이 되면 그대로 두어 원문의 N초만큼 잔류시킨다. 원문 「… 일 때 … [N초 유지]」가
+>   *조건이 유지되는 동안 계속 걸리고 조건이 깨진 뒤 N초 더 남는다*는 뜻이기 때문이다
+>   (유저 결정 2026-09-15). 보유: 에이드 `청소를 시작하겠습니다, 주인님.`(딜 버프가 통째로
+>   죽어 있었다 — 에이드 개인 딜 +4.88%) · 치사토 `사격 간파`(발동 1회 → 8회, `invincible`이라
+>   **총딜은 불변**). → **파싱에서 `[N초 유지]`를 `-1`로 바꿔 우회하지 않는다.**
 
 ### Step 5 — 새 target 유형 추가 시
 
@@ -261,14 +278,15 @@ python calculator/damage.py
 | `max_hp_only_pct` | `max_hp_only_pct` | — | ✅ | 최대 체력만 증가. `state["hp"]` 유지 |
 | `atk_caster_based_pct` | — | ② | ✅ | `get_buffs()` 후처리에서 시전자 ATK × (val/100) → 수령자 `atk_flat`에 합산. `_STAT_TO_BUFF` 매핑 없음 |
 | `atk_from_hp_pct` | — | ② | ✅ | `get_buffs()` 후처리에서 `effective_max_hp(caster) × (val/100)` → `atk_flat`에 합산. `_STAT_TO_BUFF` 매핑 없음 |
+| `max_hp_from_max_hp_pct` | — | — | ✅ | 최대+현재 체력 동반 증가, **시전자의 `effective_max_hp` × val%**. `hp_caster_based_pct`(시전자 **base_hp** 비례)와 기준이 다르다 — 시전자에게 걸린 최대 체력 버프가 값을 키운다. `shield_from_max_hp_pct`·`atk_from_hp_pct`와 같은 「시전자의 최종 최대 체력 비례」 계열이다. 가산분은 **부여 시점 스냅샷**으로 `ActiveBuff.hp_bonus_flat`에 싣고 `effective_max_hp()`가 그대로 더한다 — 조회 시점에 다시 재면 시전자가 자기 대상일 때 `effective_max_hp`가 자기를 다시 부르는 **재귀**가 된다(보호막의 `shield_per_target`과 같은 이유). 재발동은 직전 스냅샷을 먼저 걷어내고 다시 재 복리를 막는다. 만료 시 현재 체력 캡은 `hp_caster_based_pct`와 같은 자리에서 한다. `_STAT_TO_BUFF` 매핑 없음. 메어리 : 베이 갓데스 `고요한 수면 2` |
 | `persona_state` | `persona_state` | — | ✅ | 페르소나 상태 마커 버프 (`values`/`fixed_value` 없음, boolean 플래그). 수치 기여 없이 상태 판정에만 쓴다 — `_has_persona_state()`가 이 stat 보유 여부로 `allies_burst3_persona_excl_self`를 판정. 퀸(마코토)·유키코 |
 | `crit_rate` | `crit_rate` | ③ | ✅ | 기본 15% + 버프 **합연산**, 100% 상한 (`_CRIT_RATE_STATS`) |
 | `normal_atk_crit_rate` | `crit_rate` | ③ | ✅ | `crit_rate`(일반 공격용)에 합산하되, 이 기여를 뺀 합을 `crit_rate_skill`로 따로 낸다 — 스킬 딜 히트(`is_normal_atk=False`)는 그쪽을 쓴다 (`_NORMAL_ATK_ONLY_CRIT_RATE_STATS`) |
 | `crit_dmg` | `crit_dmg` | ③ | ✅ | |
 | `normal_atk_crit_dmg` | `crit_dmg` | ③ | ✅ | `crit_dmg`(일반 공격용)에 합산하되, 이 기여를 뺀 합을 `crit_dmg_skill`로 따로 낸다 — 스킬 딜 히트는 그쪽을 쓴다 (`_NORMAL_ATK_ONLY_CRIT_DMG_STATS`). 현재 이 stat을 쓰는 캐릭터는 없다 (선행 구현) |
 | `core_dmg_pct` | `core_dmg_pct` | ③ | ✅ | `core_dmg_pct`로 합산 |
-| `part_dmg_pct` | `part_dmg_pct` | ⑤ | ✅ | `is_part=True` 히트에만 가산. **`is_part`는 원문이 파츠를 명시한 damage 효과(`hits_parts: true`)에만 붙고, `enemy["has_parts"]=True`일 때만 성립**한다 — 기본공격에는 붙지 않는다(유저 결정). `has_parts`는 `DEFAULT_ENEMY`(기본 `False`)·`runner/sim.py --has-parts`·보고서 스펙 `enemy`로 노출. `squad_part_hit`/`squad_body_hit` 이벤트 라우팅도 같은 키를 쓴다. 영향: 신데렐라 : 크리스탈 웨이브 `디스트로이`→`모드 스왑 2`. 레이븐 `급소 공략`·스노우 화이트 : 헤비암즈 `어나더 화이트 파츠대미지`는 짝이 되는 `hits_parts` 효과가 없어 아직 무효 |
-| `intercept_dmg_pct` | — | — | 🚫 | 저지 부위 공격 대미지. **구현하지 않는다 — 발동 조건을 언제나 미달성으로 둔다**(유저 결정, 2026-08-11). 계산기 적 모델에 저지 부위가 없어 딜 기여가 영구히 0이다. 파싱은 정상 등록하고 시나리오에는 네거티브 항목으로 둔다. 보유: 누아르 `피날레 3`·`피날레 5` · 라피 : 레드 후드 `전황 파악 4` · 헬름 `포문 개방`(기본·애장품2 두 판본) · 아니스 : 스파클링 서머 `스파클링 미사일 2` |
+| `part_dmg_pct` | `part_dmg_pct` | ⑤ | ✅ | `is_part=True` 히트에만 가산. `is_part`가 서는 자리는 둘이다 — ① **원문이 파츠를 명시한 damage 효과(`hits_parts: true`)의 히트, `enemy["has_parts"]=True`일 때만** — 기본공격에는 붙지 않는다(유저 결정) ② 보스 패턴 좌표 off의 **파츠 히트** — 관통·발사체 폭발·「파츠 포함」 전체기가 위치 단계(`reach`)를 적은 파츠에 닿은 몫(`calculator/boss_pattern.py` §파츠 다중 타격). reach 파츠가 살아 있는 동안은 ①의 본체 히트가 판정을 내려놓고 파츠 히트가 받는다. ③ 보스 패턴 **좌표 모드의 파츠 히트** — 파츠에 떨어진 탄(일반 공격 포함)·관통·폭발 원에 닿은 파츠·「파츠 포함」 전체기(§좌표 모드). 좌표 모드에서도 ①의 본체 히트는 판정을 내려놓는다. 저지원 히트에는 안 붙는다(파츠가 아니다). `has_parts`는 `DEFAULT_ENEMY`(기본 `False`)·`runner/sim.py --has-parts`·보고서 스펙 `enemy`로 노출. `squad_part_hit`/`squad_body_hit` 이벤트 라우팅도 같은 키를 쓴다. `hits_parts` 효과: 레이븐 `템페스트` · 신데렐라 : 크리스탈 웨이브 `모드 스왑 2` · 베스티 : 택티컬 업 `미사일 컨테이너 온라인 3`. 보유: 레이븐 `급소 공략` · 신데렐라 : 크리스탈 웨이브 `디스트로이` · 스노우 화이트 : 헤비암즈 `어나더 화이트 파츠대미지`(①의 짝이 없어 ②에서만 실린다) · 아크레인저 블랙 · 로산나 : 시크 오션 |
+| `intercept_dmg_pct` | — | — | 🚫 | 저지 부위 공격 대미지. **구현하지 않는다 — 발동 조건을 언제나 미달성으로 둔다**(유저 결정, 2026-08-11). 계산기 적 모델에 저지 부위가 없어 딜 기여가 영구히 0이다. 파싱은 정상 등록하고 시나리오에는 네거티브 항목으로 둔다. 보유: 누아르 `피날레 3`·`피날레 5` · 라피 : 레드 후드 `전황 파악 4` · 헬름 `포문 개방`(기본·애장품2 두 판본) · 아니스 : 스파클링 서머 `스파클링 미사일 2` · 앨리스 : 원더랜드 바니 `당근 파티` |
 | `atk_dmg_pct` | `atk_dmg_pct` | ⑤ | ✅ | |
 | `burst_dmg_pct` | `burst_dmg_pct` | ⑤ | ✅ | `is_burst_damage=True` 히트에만 가산 |
 | `pierce_dmg_pct` | `pierce_dmg_pct` | ⑤ | ✅ | `is_pierce_damage=True` 히트에만 가산 |
@@ -279,7 +297,7 @@ python calculator/damage.py
 | `sequential_dmg_pct` | `sequential_dmg_pct` | ⑤ | ✅ | `is_sequential=True` 히트에만 가산 |
 | `optimal_range_dmg_pct` | — | ③ | ❌ | 적정거리 대미지 ▲. 미구현. ③의 고정 +30%와 별도 버프 항목 |
 | `received_dmg_pct` | `received_dmg` | ⑥ | ✅ | 음수 저장 시 감소 효과 |
-| `heal_received_pct` | — | — | ❌ | 받는 회복량 ▲. 힐 모델 없음 |
+| `heal_received_pct` | — | — | ✅ | 받는 체력 회복량 ▲. 회복 경로(timeline `handle_heal_hp_pct`·`_apply_lifesteal`)가 회복량에 `bm.heal_received_mult()` = `1 + 합/100`을 곱한다 — 최대 체력 증가에 딸린 현재 체력 증가(`max_hp_pct`·`hp_caster_based_pct`)는 회복이 아니라 곱하지 않는다(⬜ `DATA_VERIFY.md` §보스 → 니케 피해). 버프가 없으면 배율이 정확히 1.0이다. 기본 경로에서는 체력이 거의 늘 가득 차 있어 결과가 안 바뀐다(하네스 무변동) — 보스 공격 패턴이 있을 때 의미가 생긴다. 크라운 `릴렉스`, 네온 : 비전 아이 `건강한 몸 3`, 앨리스 : 원더랜드 바니 `소중한 큰 당근 3` |
 | `element_bonus_pct` | `element_bonus_pct` | ⑦ | ✅ | `is_element_match=True` 시 ⑦에 가산 |
 | `normal_atk_dmg_pct` | `normal_atk_dmg_pct` | ① | ✅ | 「일반 공격 대미지 N% **배율** ▲」. `is_normal_atk=True`일 때 **무기 계수 자체에 곱한다** — `coeff × (1 + Σpct)`. 소장품 SG·SMG가 이 층 (GAMEPLAY §차지 배율의 RL·SR과 대칭) |
 | `max_ammo_pct` | `max_ammo_pct` | — | ✅ | 타임라인 처리. `CharState` 장탄 계산 반영 |
@@ -298,10 +316,10 @@ python calculator/damage.py
 | `accuracy_pct` | `accuracy_pct` | — | ⚠️ | DealForm 어느 항에도 안 들어간다. 단 `timeline.py`의 `_core_hit_prob()`가 탄착군 직경(`base_diameter - acc_slope × accuracy_pct`) 산출에 쓰므로 **코어 보유 적(`core_px > 0`)에서는 코어히트율을 통해 딜에 반영된다**. 기본 보스는 `core_px = 0`이라 무발동. 메카닉 조사 기록은 `docs/mechanics/명중률 탄착군.md` |
 | `burst_charge_speed_pct` | `burst_charge_speed_pct` | — | ✅ | 수령자 구분 없는 시전자 기준식. 모든 활성 버프마다 `시전자 발당 기준 게이지×버프값×실제 히트 수`를 가산한다. 시전자의 일반 공격 첫 명중 전에는 CDN `(발당)`, 이후에는 `(대상)`을 참조하며 전환은 게이지 초기화 뒤에도 유지. 첫 일반 공격은 명중 상태를 먼저 갱신하고 그 공격의 게이지를 계산한다. 히트 없는 `burst_charge_pct`에는 기여 없음. `_route_burst_charge()`·`CharState._burst_gain()`. 마나·렐릭 퀀텀 큐브·아니스 : 스타·그레이브가 같은 stat을 쓴다 |
 | `optimal_range_max` | — | — | ❌ | 최대 적정 사거리 증가. 미구현 |
-| `optimal_range_max_pct` | — | — | ❌ | 최대 적정 사거리 **% ▲**(`optimal_range_max`의 비율 표기판). 계산기에 사거리 항이 없어 **파싱만 하고 구현하지 않는다**(유저 결정, 2026-08-17) — 딜 기여 0. 레오나 `우렁찬 포효` |
-| `optimal_range_min` | — | — | ❌ | 최소 적정 사거리 % ▲. 미구현 |
-| `explosion_range` | — | — | ❌ | 폭발 범위 증가. 미구현 |
-| `pierce_range` | — | — | ❌ | 관통 범위 증가. 미구현 |
+| `optimal_range_max_pct` | `optimal_range_max_pct` | — | ✅ | 최대 적정 사거리 **% ▲**(`optimal_range_max`의 비율 표기판). **보스 거리(`enemy.distance`)가 있을 때만** 적정 구간의 최대를 ×(1 + N%) 한다 — 판정의 정본은 `buff_manager.in_optimal_range`. 거리가 없으면(기본 경로) 무기군 목록 판정이라 딜 기여 0이다(2026-08-17 「파싱만」 결정을 2026-09-18 거리 모델로 풀었다). 레오나 `우렁찬 포효` |
+| `optimal_range_min` | `optimal_range_min_pct` | — | ✅ | 최소 적정 사거리 % ▲ — **최소 거리를 N% 줄여** 구간을 가까이까지 넓힌다(유저 결정 2026-09-18 — 에이드 : 에이전트 바니 4.44% × 10중첩 + 55.56% = 100%면 SR 45~100이 0~100). 보스 거리가 있을 때만(`in_optimal_range`). 에이드 : 에이전트 바니 `스파이 렌즈`·`최첨단 요원 장비` |
+| `explosion_range` | `explosion_range` | — | ✅ | 폭발 범위 ▲(%). **대미지 식에는 안 들어간다** — `get_buffs`가 합산하고, 보스 패턴 좌표 off에서는 발사체 폭발이 닿는 파츠·저지원 위치 단계를 가르고(합 100% 이상이면 4단계 표적까지 — `boss_pattern.hit_reach`), **좌표 모드에서는 폭발 원의 반지름을 ×(1 + N%)** 한다(`CharState._area_radius` — CDN `spot_explosion_range` × `explosion_scale`). 네온 : 비전 아이 · 라플라스 · 라피 : 레드 후드 · 베스티 : 택티컬 업 · 아니스 : 스타 |
+| `pierce_range` | `pierce_range` | — | ✅ | 관통 범위 ▲(%). `explosion_range`와 같은 자리 — 좌표 off는 관통이 닿는 단계를 가르고(합 100% 이상이면 2단계 파츠·저지원까지), 좌표 모드는 관통 원(착탄점 주변, 기본 `pierce_px` 25px ⬜)의 반지름을 ×(1 + N%) 한다. 도로시 : 세렌디피티 · 레드 후드 |
 | `pierce_enabled` | `pierce_enabled` | — | ✅ | boolean 플래그. `get_buffs()` boolean 분기에서 `True` 세팅. `_fire()`/`_tick_charge()`에서 `is_pierce_damage`에 반영 |
 | `fullburst_duration` | `fullburst_duration` | — | ✅ | 게임 내 동작은 instant이나, `switching→full_burst` 진입 시점에 값을 읽어야 하므로 buff로 등록해 보관. `BurstController.tick()`의 switching 단계에서 `bm._active`를 순회해 합산 후 `_full_burst_end_t` 결정. `burst_cast` 타이밍으로 등록된 버프는 해당 캐릭터가 이번 사이클의 3단계 발동자(`_fb_caster`)일 때만 반영 — 본인 버스트 때만 지속 시간을 바꾸는 캐릭터 지원. 모든 풀버스트에 적용되는 캐릭터는 `passive` 등 다른 타이밍을 사용하면 `_fb_caster` 조건 없이 항상 반영됨 |
 | `effect_interval` | — | — | ✅ | `target_effect`가 가리키는 `every:Ns` 효과의 주기를 **초 단위로 가감**. `tick()`의 `every:Ns` 루프에서 `_active`를 탐색해 `stat=="effect_interval" and target_effect==eff["name"]`인 버프 값을 합산, `base_interval + flat`에 `skill_cooldown_pct` 배율을 곱한다. **런타임 조건을 재평가한다**(2026-09-10) — 조건부 영구 버프는 조건이 거짓이어도 `_active`에 등록되므로, 안 보면 꺼져 있어야 할 주기 단축이 그대로 먹는다(엠마 : 택티컬 업 `포메이션 LT 5~7`은 은화가 없으면 30초 주기를 유지해야 한다). `_STAT_TO_BUFF` 매핑 없음. `target_effect` 필수. 에이다 `섬광 수류탄 투척 발동 시간 조건`(조건 없음 — 이 변경의 영향 밖) |
@@ -318,16 +336,16 @@ python calculator/damage.py
 | `trigger_count_reduce` | — | — | ✅ | `_dispatch_instant`에서 처리 |
 | `shield_dmg_pct` | — | — | ❌ | 보호막 대미지 ▲. 미구현 |
 | `cover_def_pct` | — | — | 🚫 | 엄폐물 방어력 ▲. 엄폐물은 방어력 없이 피해를 그대로 받는다 |
-| `cover_hp_pct` | — | — | 🚫 | 엄폐물 체력 ▲. 엄폐물 체력 기본값(`config["cover_hp"]`)이 임의값이라 배율을 얹지 않는다 |
+| `cover_hp_pct` | — | — | ✅ | 엄폐물 최대 체력 ▲. `bm.cover_max_hp()` = 기본값(`config["cover_hp"]`, 임의값) × (1 + 비례 합/100) + Σ 시전자 최종 최대 체력 × N%. 원문 「시전자의 최대 체력 비례 엄폐물 최대 체력 N% ▲」는 `scaling: "max_hp"`(`cover_heal_pct`와 같은 표기) — 시전자 기준 항으로 간다. **기본값이 임의값이어도 배율은 얹는다**(유저 결정 2026-09-15). 보스 패턴이 있을 때 프레임마다 `bm.sync_cover_hp()`가 증감을 현재 체력에 옮긴다(늘면 같이 차고 줄면 잘린다, 부서진 엄폐물은 그대로). `get_buffs`에 자리가 없는 직접 조회 stat이다(`_DIRECT_READ_STATS`). 소장품 `마음의 버팀목` · 렐릭 커버 큐브 `커버 헬스 업 HC`(`scaling: max_hp`, `scraper/cdn_tables.py` `CUBE_SCALING`) · 티아 `카멜레온 은신술` |
 | `outgoing_heal_pct` | — | — | ❌ | 주는 회복량 ▲. 힐 모델 없음 |
 | `shield_from_max_hp_pct` | — | timeline | ✅ | 시전자의 유효 최대 체력 N%만큼 대상별 보호막 생성. 지속시간 동안 `during_shield` 활성, 적용 대상에게 `event:shield_applied` 통지 |
 | `shared_shield_from_max_hp_pct` | — | timeline | ✅ | 아군 공용 보호막. 시전자의 유효 최대 체력 N%만큼 생성하되 **부여 대상은 시전자 1인**(텍스트에 대상 표기가 없어도 `all_allies`가 아니다). `_SHIELD_STATS`로 `shield_from_max_hp_pct`와 같은 경로를 타 `during_shield`·`event:shield_applied`도 동일하게 성립한다. 블랑 `럭키 가드` |
-| `next_shield_hp_pct` | — | — | ❌ | 다음 보호막 체력 N% ▲. 다음 1회 증폭·소모 경로 미구현 |
+| `next_shield_hp_pct` | — | — | ✅ | 다음 보호막 체력 N% ▲. 보호막이 **대상에게 적용되는 순간**(`_activate()` 보호막 후처리) `bm.take_next_shield_amp()`가 그 대상의 이 버프를 꺼내 생성량에 `(1 + N/100)`을 곱하고 소모한다 — 누가 만든 보호막이든 받는 쪽 기준이고, 여럿이면 합산해 전부 소모한다(⬜ `DATA_VERIFY.md` §보스 → 니케 피해). 보호막량만 바뀌어 기본 경로의 딜은 무관하다. 델타 : 닌자 시프 `비기 : 닌자 오버드라이브 4` |
 | `accumulate_max_scale_pct` | — | — | ❌ | 특정 효과의 최대 누적량 N% ▲. `target_effect` 필수. 미구현 |
 | `heal_overcharge_store` | — | — | ❌ | 초과 회복 저장. 미구현 |
 | `heal_overcharge_store_atk_pct` | — | — | ❌ | ATK N%까지 받는 회복량 저장. 힐 모델 없음 |
-| `shield_restore_pct` | — | — | ❌ | 보호막 회복 ▲. 아군 피격·보호막 소모 모델 없음 |
-| `buff_max_stack_add` | — | — | ❌ | 중첩 가능 이로운 효과의 **중첩 한도(`max_stack`) N개 ▲**. 대상 버프를 특정하지 않고 대상 아군의 스택형 이로운 효과 전반에 적용. `ActiveBuff`의 max_stack을 런타임에 올리는 경로 필요. 플로라 |
+| `shield_restore_pct` | — | — | ❌ | 보호막 회복 ▲. 미구현 — **로스터에 쓰는 효과가 없다**(2026-09-14 확인). 보호막 소모 모델(보스 공격)은 있으므로 사용처가 생기면 `absorb_shield`가 깎은 양을 되돌리는 자리에 얹는다 |
+| `buff_max_stack_add` | — | — | ❌ | 중첩 가능 이로운 효과의 **중첩 한도(`max_stack`) N개 ▲**. 대상 버프를 특정하지 않고 대상 아군의 스택형 이로운 효과 전반에 적용. `ActiveBuff`의 max_stack을 런타임에 올리는 경로 필요. 플로라 · 앨리스 : 원더랜드 바니 `당근과 토끼 파티 2` |
 | `burst_dmg_single_pct` | — | — | ❌ | 단일 대상 버스트 대미지 ▲. 미구현 (`burst_dmg`로 통합 필요 또는 별도 처리) |
 | `burst_dmg_aoe_pct` | `burst_dmg_aoe_pct` | ⑤ | ✅ | 전체 대상 버스트 대미지 ▲. `_factor5()`의 `is_burst_damage` 블록 **안**에서 `hit_type["is_aoe_burst"]`일 때만 가산 — 구조적으로 `bonus_damage`가 탈 수 없다. 플래그는 `timeline.simulate` `_handle_damage_eff`가 `base_stat=="burst_damage" and target=="all_enemies"`로 세운다. **AoE 판정 기준**: 버스트 스킬의 대상 설명이 `적 전체에게`로 끝나는 효과 — `적 전체에게(파츠 포함)`처럼 괄호 부연이 붙어도 포함한다(레이븐). **같은 clause의 `bonus_damage`·`dot_damage`는 제외** — "버스트 스킬 대미지"만 증폭한다(이사벨 `타겟 마킹 2·3` 추가 대미지는 비대상, 유저 확인). 트리나 `뻗은 뿌리`/`시든 뿌리` |
 | `burst_cooldown` | `burst_cooldown` | — | ✅ | buff 상태로 지속. `BurstManager.tick()`의 `full_burst_start` 분기가 풀버스트 1회당 1회씩 `burst_ready_at`을 당긴다 (`_cd_applied_at_cast`로 cast 시 반영분 중복 방지) |
@@ -335,14 +353,15 @@ python calculator/damage.py
 | `skill_cooldown_pct` | `skill_cooldown_pct` | — | ⚠️ | 스킬 쿨타임 % 감소. `tick()`의 `every:Ns` interval에 반영. `target_effect` 미지원 — target 캐릭터의 모든 `every:Ns` 스킬에 일괄 적용 |
 | `stun` | — | — | ✅ | 기절. `bm.is_stunned(name)`: `_active`에서 `stat=="stun"` 버프 유무로 판별. 일반공격(`CharState.tick()`)·버스트 사용(`BurstController._try_use_stage()`) 차단. 기절 중 버스트 단계는 만료까지 매 프레임 재시도 |
 | `invincible` | — | — | ✅ | 무적. 보스 공격(`timeline._boss_attack`)의 **체력 피해만** 0으로 한다 — 보호막·엄폐물은 그대로 깎이고 피격 이벤트도 나간다(⬜ `DATA_VERIFY.md` §보스 → 니케 피해). 판정은 `bm.has_live_stat()` |
-| `undying` | — | — | ❌ | 불굴. 미구현 — 보스 공격·전투불능 모델(2026-09-14)은 있으나 이 stat은 읽지 않는다 |
+| `undying` | — | — | ✅ | 불굴. 보스 공격(`timeline._boss_attack`)에서 체력이 0이 될 발을 **체력 1을 남기고** 받는다 — 쓰러지지 않았으므로 `hp_below:T` 임계 이벤트는 정상으로 나간다(⬜ `DATA_VERIFY.md` §보스 → 니케 피해). 무적 판정 뒤에 본다. 판정은 `bm.has_live_stat()` — 지연 resolve 대상(`allies_lowest_hp_excl:1`)도 `_live()`가 그 자리에서 확정한다. 나유타 `부동심`, 블랑 `쇼타임 2` |
 | `stealth` | — | — | ✅ | 은신. 고르는 보스 공격(`random:N`·`top_atk:N`)의 후보에서 빠진다(`timeline._attack_targets`). 전원이 은신이면 은신을 무시한다. `[상태명 : 1인 공격 대상에서 제외 직접 피격 시 해제] [N초 유지]` 문형의 정본 표기다(`PARSING.md` §6) — 뒤쪽 해제 조건은 `received_hit_count:1` + `remove_named_buff` 즉발로 따로 적는다. 로산나 `은신`, 델타 : 닌자 시프 `인법 카모플라쥬 2` |
 | `decoy` | — | — | ❌ | 분신 생성. 미구현 |
 | `infinite_ammo` | `infinite_ammo` | timeline | ✅ | boolean 플래그. 활성 중 일반 공격은 장탄을 줄이지 않고 `squad_ammo_consume`도 발생시키지 않으며, 장탄 0에서도 재장전 없이 발사한다. 활성 시 진행 중 재장전은 완료 이벤트 없이 취소하고 남은 장탄을 보존한다. 그레이브 `미래 예지`, 나유타 `고행 3` |
-| `focus_fire` | — | — | ❌ | 사격 집중. 미구현 |
+| `focus_fire` | — | — | ✅ | 사격 집중. **좌표 모드에서** 받은 니케가 카메라 니케의 조준점을 따른다(`timeline._resolve_aims`가 `bm.has_live_stat`으로 묻는다 — 풀버스트 동안은 버프 없이도 전원이 이 상태다, 유저 확인 2026-09-18). 좌표 모드가 아니면 조준점이 없어 무영향. 리틀 머메이드 `버블 오더`(`focusing` 조건) |
 | `enemy_movement_disable` | — | — | ❌ | 적 이동 불가. 적 이동 모델 없음 |
-| `debuff_immune` | `debuff_immune` | — | ✅ | `_activate()`에서 harmful 효과 차단 |
+| `debuff_immune` | `debuff_immune` | — | ✅ | `_activate()`에서 harmful 효과 차단. 보스 디버프(`bm.apply_boss_effect`)도 같은 판정(`_harmful_blocked`)이다 — `harmful_irremovable`은 거르지 않는다 |
 | `debuff_immune:[name]` | — | — | ✅ | `_activate()`에서 `debuff_immune:{eff_name}` 차단. `_has_immune()` 직접 탐색으로 `_STAT_TO_BUFF` 매핑 불필요 |
+| `debuff_immune_count` | — | — | ✅ | **개수 제한 면역**. 원문 `[해로운 효과 면역 N개]`의 N을 `fixed_value`(레벨별이면 `values`)에 싣고, harmful 하나를 막을 때마다 하나를 소모한다 — 무제한인 `debuff_immune`과 다른 축이다. 개수는 `debuff_cleanse`와 같이 **대상 니케 1인당**이다(보스 디버프가 니케마다 따로 붙으므로). **잔량은 버프 이름 단위 풀**이라, 같은 이름을 여러 경로로 부여해도 합이 아니라 최대값 하나를 공유한다(`_consume_immune_charge`) — 에이드가 같은 `완벽한 메이드`를 스킬1(전투 시작)·스킬2(일반 공격 420회) 두 경로로 부여하고 `[1 중첩]`이라 인게임에서 총 1개이기 때문이다. **재부여가 소모량을 0으로 되돌린다**(`_immune_used`) — 그게 두 번째 블록의 역할이다. 소모는 `_harmful_blocked()`에서 일어나고 부르는 쪽이 `_activate` 대상 필터와 `apply_boss_effect` 둘뿐이라 이중 소모가 없다. ⬜ 잔량이 0이 된 버프는 `_active`에 남아 있기만 하고 막지 않는다 — 인게임처럼 아이콘이 사라지지는 않는다. 보스 공격 패턴이 없으면 막을 harmful이 없어 무발동. 에이드 `완벽한 메이드` |
 | `stun_immune` | `stun_immune` | — | ✅ | `bm.is_stunned()`에서 `_has_immune(name, "stun_immune")` 체크로 기절 차단 |
 | `charge_speed_buff_immune` | `charge_speed_buff_immune` | — | ✅ | `get_buffs()` 후처리에서 `_quant_parts["charge_speed_pct"]` 중 **양수 기여만** 제거. **스킬 버프만 면역**이고 `_source_tag`가 `equipment`(오버로드)·`cube`인 기여는 남긴다 (유저 확인, 2026-09-02 — `_CHARGE_IMMUNE_EXEMPT_SOURCES`). 소스를 가리지 않는 것은 `charge_time_fixed` 쪽이다 |
 | `charge_speed_debuff_immune` | `charge_speed_debuff_immune` | — | ✅ | 위와 같되 **음수 기여만** 제거 |
@@ -356,11 +375,11 @@ python calculator/damage.py
 | `armor_break_enabled` | `armor_break_enabled` | ②⑤ | ✅ | 일반 공격을 방어력 무시 대미지로 치환(boolean 플래그). `timeline.py`가 `buffs.get("armor_break_enabled")` → `is_armor_break_damage`로 읽고, `damage.py`가 ② 적 방어력 0 처리 + ⑤ `armor_break_dmg_pct` 가산. 치사토 `방어 관통 사격` |
 | `gauge_charge_enabled` | — | — | ✅ | buff로 등록. 게이지 충전 가능 상태 활성화. `gauge_id` 필수 |
 | `gauge_max_add` | — | — | ✅ | `_dispatch_instant()`의 `gauge_charge`에서 cap 합산 |
-| `taunt` | `taunt` | — | ✅ | 도발. 고르는 보스 공격(`random:N`·`top_atk:N`)의 자리를 도발 중인 니케가 먼저 가져간다(`bm.taunters()`). **적에게 건 `taunt`는 시전자가 도발자다**(목단 `여긴 내가 맡는다!` — 대상이 `enemies_top_atk:3`). `all`·`slot:` 공격은 도발과 무관하다 |
-| `cover_disabled` | — | — | ✅ | `특이 사항 : 버스트 스킬 시전 중 엄폐 불가` — 무기 변경 모드 동안 엄폐가 막힌다(`values`/`fixed_value` 없음). **구현(유저 결정 2026-09-14, 2026-08-17 「파싱만」 결정을 뒤집음)**: `CharState.cover_blocked()` 한 곳을 정책(버스트 엄폐컨·장전컨)·명시 시퀀스·전체 엄폐가 모두 보고 엄폐 진입을 막는다. 켜진 동안의 재장전은 엄폐물 뒤가 아니라 보스 공격을 체력으로 받는다. 무시된 시퀀스 엄폐는 재장전 로그에 `엄폐 불가(시퀀스 무시)`로 남는다. 모드에 종속되므로 `passive` + `self_state:[모드명]` + `duration: -1`로 붙인다. 라플라스 `라플라스 버스터 5`(기본·애장품 2단계), 목단 `정정당당 승부다! 6`(기본만) |
+| `taunt` | `taunt` | — | ✅ | 도발. **전체 공격(`all`)을 뺀 모든 보스 공격**(`random:N`·`top_atk:N`·`slot:`)의 자리를 도발 중인 니케가 먼저 가져가고 남은 자리를 원래 규칙으로 채운다(`bm.taunters()`, 유저 확인 2026-09-15). 도발에 안 끌리는 공격은 공격 spec `ignore_taunt: true`. **적에게 건 `taunt`는 시전자가 도발자다**(목단 `여긴 내가 맡는다!` — 대상이 `enemies_top_atk:3`) |
+| `cover_disabled` | — | — | ✅ | `특이 사항 : 버스트 스킬 시전 중 엄폐 불가` — 무기 변경 모드 동안 엄폐가 막힌다(`values`/`fixed_value` 없음). **구현(유저 결정 2026-09-14, 2026-08-17 「파싱만」 결정을 뒤집음)**: `CharState.cover_blocked()` 한 곳을 정책(버스트 엄폐컨·장전컨)·명시 시퀀스·전체 엄폐가 모두 보고 엄폐 진입을 막는다. **이미 엄폐 중일 때 켜지면 그 프레임에 엄폐가 풀린다**(`CharState._drop_blocked_cover`, 유저 확인 2026-09-15 — 진행 중인 재장전은 끊지 않고, 재장전 로그에 `엄폐 해제(엄폐 불가)`). 켜진 동안의 재장전은 엄폐물 뒤가 아니라 보스 공격을 체력으로 받는다. 무시된 시퀀스 엄폐는 재장전 로그에 `엄폐 불가(시퀀스 무시)`로 남는다. 모드에 종속되므로 `passive` + `self_state:[모드명]` + `duration: -1`로 붙인다. 라플라스 `라플라스 버스터 5`(기본·애장품 2단계), 목단 `정정당당 승부다! 6`(기본만) |
 | `lock_on` | `lock_on` | — | ❌ | **스노우 화이트 : 헤비암즈 전용**. 세븐스 드워프 공격 대상 지정 고유 메카닉. `values`/`fixed_value` 없음 |
 | `possessed` | — | — | ❌ | **일레그 : 붐 앤 쇼크 전용** 적 마커. `target_state:빙의` 조건 게이팅용. `_STAT_TO_BUFF` 매핑 없음 — `_active`에만 등록되어 name 기반 condition 매칭. `values`/`fixed_value` 없음 |
-| `effect_target_count_add` | — | — | ❌ | 특정 효과의 **타격 대상 수** N 증가 (`target_effect` 필수, `fixed_value`에 증가량). 텍스트: `[효과명] 적용 대상 N ▲` · `최대 [효과명] 대상 수 N ▲`. **단일 보스 sim에서는 항상 no-op** — 대상이 이미 1기로 수렴해 있다(`GAMEPLAY.md §condition`). 다수 적 지원 전까지 구현하지 않는다. 레이 (가칭) `섬멸 지원 4` (→ 아스카 : WILLE `섬멸 태세 추가 효과`), 스노우 화이트 : 헤비암즈 `세븐스 드워프 풀 액티브 5` (→ `록 온`) |
+| `effect_target_count_add` | — | — | ❌ | 특정 효과의 **타격 대상 수** N 증가 (`target_effect` 필수, `fixed_value`에 증가량). 텍스트: `[효과명] 적용 대상 N ▲` · `최대 [효과명] 대상 수 N ▲`. **적이 보스 하나면 항상 no-op** — 대상이 이미 1기로 수렴해 있다(`GAMEPLAY.md §condition`). 보스 패턴 `summon`(쫄몹)이 생겼지만 **대상 수를 늘리는 쪽은 구현하지 않았다**. 레이 (가칭) `섬멸 지원 4` (→ 아스카 : WILLE `섬멸 태세 추가 효과`), 스노우 화이트 : 헤비암즈 `세븐스 드워프 풀 액티브 5` (→ `록 온`) |
 | `effect_range_pct` | — | — | ❌ | 특정 효과의 **공격 범위** % 증가 (`target_effect` 필수). 텍스트: `[효과명] 공격 범위 N% ▲`. 거리 모델이 없어 **항상 no-op**. 레이 (가칭) `섬멸 지원 5` |
 
 ### damage stat
@@ -398,7 +417,7 @@ stat과 직교하는 **값 산정 기준**이다. `stat` 테이블에 없으므�
 |---|---|---|---|
 | `stack_count` (+ `scaling_ref`) | buff · damage · instant | ✅ | `_get_value()`가 계수에 스택을 곱하고(`buff_manager.py`), damage stat이면 `_handle_damage_eff()`가 히트 수로도 읽는다 |
 | `lost_hp_pct` | buff · instant | ✅ | `_get_value()` — 잃은 체력 % 비례 |
-| `max_hp` | instant(`heal_hp_pct`) 전용 | ✅ | 힐 기준을 기본 체력 대신 최종 최대 체력으로 (`timeline.py` 힐 블록). 대미지 경로와 접점이 없다 |
+| `max_hp` | instant(`heal_hp_pct`·`cover_heal_pct`) · buff(`cover_hp_pct`) 전용 | ✅ | 원문 「**시전자의** 최종 최대 체력 비례」. `heal_hp_pct`: 힐 기준을 기본 체력 대신 **시전자** 최종 최대 체력으로 — 아군 전체 힐도 모두 같은 양이고, 받는 사람의 최대 체력은 상한일 뿐이다(`handle_heal_hp_pct`, 2026-09-15 수정 — 종전엔 받는 사람의 최대 체력이었다). `cover_heal_pct`: 엄폐물 회복 기준을 엄폐물 최대 체력 대신 **시전자** 최종 최대 체력으로 (`handle_cover_heal_pct`). `cover_hp_pct`: 엄폐물 기본값 비례 대신 **시전자** 최종 최대 체력 × N%를 더한다(`bm.cover_max_hp`, 큐브는 `cube.json`의 `scaling`). 대미지 경로와 접점이 없다 |
 | `max_hp_additive` (+ `scaling_hp_pct`) | damage | ✅ | `_handle_damage_eff()`가 `bm.effective_max_hp(시전자) × pct/100`을 **buffs 사본의 `atk_flat`**에 더한다 — `atk_from_hp_pct`와 같은 자리(공격력 증가% **뒤**)다. 유일 사용처는 메이든 : 아이스 로즈 `다이아몬드 더스트`이고, 그 캐릭터에서는 이 항이 공격력의 4배라 빠지면 버스트가 1/8이 된다 |
 
 ### instant stat
@@ -418,15 +437,15 @@ stat과 직교하는 **값 산정 기준**이다. `stat` 테이블에 없으므�
 | `buff_stack_init` | `_dispatch_instant()` | ✅ | `target_effect` 버프가 없을 때만 N 스택으로 초기 생성. `_effects`에서 버프 정의 조회 후 `ActiveBuff` 직접 생성 |
 | `debuff_stack_add` | `_dispatch_instant()` | ✅ | |
 | `debuff_stack_remove` | `_dispatch_instant()` | ✅ | |
-| `remove_named_buff` | `_dispatch_instant()` | ✅ | `target_effect` 필수 |
-| `debuff_cleanse` | `_dispatch_instant()` | ✅ | |
-| `enemy_buff_cleanse` | — | 🚫 | 적 버프 모델 없음 |
+| `remove_named_buff` | `_dispatch_instant()` | ✅ | `target_effect` 필수. 기본은 이름이 같은 버프를 **대상·시전자와 무관하게 전부** 지운다. **`remove_scope: "target"`이면 `target`으로 풀린 캐릭터에게서만** 지운다(2026-09-18 구현) — 여럿에게 걸린 인스턴스는 그 캐릭터만 `target_chars`에서 빠지고, 남은 대상이 0명일 때 인스턴스가 사라지며 그때만 `event:state_end:`가 나간다(`debuff_cleanse`와 같은 모양). 같은 이름의 상태를 캐릭터마다 따로 드는 경우에 필요하다 — 전역 제거로는 짝의 모드까지 지워 동기화가 끊긴다(길티 : 마이티 바니 · 신 : 스위프트 바니 `바니 모드` 해제 8항목) |
+| `debuff_cleanse` | `_dispatch_instant()` | ✅ | 대상의 `polarity: harmful` 버프를 제거한다(`harmful_irremovable`은 못 지운다). **개수는 대상 니케 1인당이다** — 원문 `[해로운 효과 해제 N개]`의 N을 `fixed_value`(레벨별이면 `values`)에 싣고 그만큼만 지운다(2026-09-15 유저 확정. 종전에는 개수를 무시하고 전부 지웠고, 보유자가 0명이라 드러나지 않았다). 보스 디버프가 니케마다 따로 붙으므로 「1개」를 스쿼드 전체 1개로 읽으면 5인 스쿼드에서 한 명만 풀린다. 제거 우선순위는 원문에 없어 **부여가 이른 것부터**(`_active` 배열 순서)로 정했다 — `docs/scenarios/미카 _ 스노우 버디.md §해석 선언`. **한 버프가 여러 니케에게 걸려 있으면 해제 대상만 `target_chars`에서 빼고**, 남은 대상이 없을 때 버프가 사라진다(통째로 지우면 대상이 아닌 아군의 디버프까지 풀린다). N을 안 적은 항목은 종전대로 전부 지운다. 보스 지속 피해는 `timeline._boss_dots`가 매 프레임 활성 버프를 다시 읽어 남은 틱을 버린다. 미카 : 스노우 버디 `설온제` · 코코아 `프로 종이접기 2`·`프로 메이드장` · 크러스트 `든든한 요리 2`·`든든한 요리 3` · 소라 `품 안의 비밀 2` · 클레어 `R+G+B 2` |
+| `enemy_buff_cleanse` | timeline 핸들러 | ✅ | 적 이로운 효과 해제 N개(`values` = 레벨별 개수). 보스 패턴의 열린 `buff` 패턴 하나가 이로운 효과 하나다 — `BossScript.dispel`이 나중에 두른 것부터 N개를 끄고(`irremovable` 제외), 꺼진 패턴은 방어력 오버레이와 받는 대미지를 둘 다 잃는다. 다음 프레임 맨 앞에 반영(⬜ 순서·범위 `DATA_VERIFY.md` §보스 → 니케 피해). 핸들러는 보스 패턴이 있을 때만 등록된다 — 없으면 적에게 이로운 효과가 없어 종전과 같은 무발동. 로산나 `온 더 렘 2` |
 | `force_reload` | timeline 핸들러 | ✅ | 시전자 `CharState.ammo = 0` 후 `_start_reload()` 강제 호출. 이미 재장전 중이면 스킵 |
 | `targeting_exclude` | — | ❌ | 공격 대상 타겟팅 제외. 미구현(같은 뜻은 `stealth`가 맡는다). **2026-09-05 현재 사용처 없음** — 유일한 보유자였던 델타 : 닌자 시프 `인법 카모플라쥬 2`가 원문에 `[10초 유지]`가 붙어 있어 로산나 `은신`과 같은 `stealth` buff로 옮겨 갔다(instant는 지속시간을 담지 못한다). 키는 남긴다 |
 | `heal_overcharge_discharge` | — | ❌ | 저장된 회복량 방출. `target_effect` 필수. 힐 모델 없음 |
 | `current_hp_reduce` | `_dispatch_instant()` → timeline 핸들러 | ✅ | |
-| `cover_heal_pct` | 타임라인 `handle_cover_heal_pct` | ✅ | 엄폐물 최대 체력(`config["cover_hp"]`, **임의값**)의 N% 회복. **부서진 엄폐물은 되살아나지 않는다**(유저 확인 — 재생성 없음). 엄폐물 체력은 보스 공격 패턴이 있을 때만 깎인다 |
-| `burst_reentry` | — | ❌ | `_check_reenter()` 경로와 별도. 미구현 |
+| `cover_heal_pct` | 타임라인 `handle_cover_heal_pct` | ✅ | 엄폐물 최대 체력(`config["cover_hp"]`, **임의값**)의 N% 회복. **`scaling: "max_hp"`면 기준이 시전자의 최종 최대 체력**이다 — 원문 「시전자의 최종 최대 체력 비례 엄폐물 체력 회복」(슈가 `블랙 타이푼 3`). 기준 표기 없는 「엄폐물 체력 회복 N%」(나가·츠바이·리타)는 엄폐물 기준. **부서진 엄폐물은 되살아나지 않는다**(유저 확인 — 재생성 없음). 엄폐물 체력은 보스 공격 패턴이 있을 때만 깎인다 |
+| `burst_reentry` | 타임라인 `handle_burst_reentry` | ✅ | `[버스트 재진입 N단계]` — 이번 버스트 1회의 재진입 사건. **`fixed_value`가 재진입 단계 N**이다(유저 결정 2026-09-14). 핸들러가 `state["pending_reentry"][시전자]`에 적어 두고, `_cast_burst` 직후 `BurstController._check_reenter()`가 꺼내 지운다 — 상태 buff `burst_stage_override:reenterN`(아니스 : 스타 `모두의 별`, `[… 재진입 N단계로 변경] [지속]`)과 같은 자리로 합류해 0.5s 대기·단계당 사이클 1회 규칙을 그대로 따른다. ⬜ 재진입은 지금 **사용한 그 단계**를 다시 연다 — N이 시전자 단계와 다른 사례(차임 `[버스트 재진입 2단계]`, 미파싱)가 들어오면 확인할 것. 티아 `도마뱀의 보호 3` · 앨리스 : 원더랜드 바니 `소중한 큰 당근` |
 | `revive` | 타임라인 `handle_revive` | ✅ | `[체력 N%로 부활]` — values가 부활 직후 체력 %(대상 최대 체력 기준). 값이 없으면 즉시 실패한다. 부활은 만탄으로 바로 싸우고 버스트 쿨은 이어간다. 마나 `매터 감마 3` |
 | `gauge_charge` | `_dispatch_instant()` | ✅ | `gauge_id` 필수 |
 | `gauge_consume` | `_dispatch_instant()` | ✅ | `gauge_id` 필수 |
@@ -474,12 +493,15 @@ stat과 직교하는 **값 산정 기준**이다. `stat` 테이블에 없으므�
 | `full_charge_fire` | ✅ | **발사**(`풀 차지 공격 시`). `_tick_charge()`가 풀차지 발사 1회당 1회 notify. 빗나가도 발동한다 |
 | `full_charge_fire_count:N` | ✅ | `full_charge_fire` 이벤트 N회마다. `trigger_count_reduce` 버프로 N 감소 가능. **구 표기 `full_charge_count:N`은 이 키의 별칭으로 남겨 뒀다** — 데이터는 전부 옮겼지만 옛 표기가 들어와도 조용히 영구 무발동이 되지 않게 한다 |
 | `full_charge_hit_count:N` | ✅ | `full_charge_hit` 이벤트 N회마다(`풀 차지 공격 N회 명중 시`). 브래디 `페이버릿 캔디` |
+| `non_full_charge_fire_count:N` | ✅ | **논차지 발사** N회마다(`풀 차지 공격이 아닌 일반 공격 N회 공격 시`). `full_charge_fire`의 여집합 — `_charge_fire()`의 `is_full` 분기 `else`에서 `bm.notify("non_full_charge_fire", ...)`. `_timing_to_index_key()`가 `non_full_charge_fire`로 접고 `trigger_count_reduce`도 `full_charge_fire_count:N`과 같은 규약으로 받는다. **톡톡이(`click` 모드 `tap`) 없이는 차지 무기의 모든 발사가 풀차지라 영구 무발동**이고, 톡톡이 자체가 불가한 풀차지 전용 9명에게는 구조적으로 성립하지 않는다(`docs/CONTROL.md` §톡톡이). 크러스트 `마이야르`·`든든한 요리` |
+| `charge_hold_count:N:M` | ✅ | `charge_hold:N` 판정이 **M회 누적될 때마다**(`풀 차지 상태 N초 이상 유지를 M회 실행 시`). 임계값 N은 `charge_hold:N`과 같은 규약으로 `BuffManager.charge_hold_thresholds(caster)`가 뽑고(이 키도 함께 훑는다), 카운터는 `_timing_to_index_key()`가 `charge_hold:N`으로 접어 센다. 한 차지에 1회만 판정하므로(`_charge_hold_fired`) M회를 채우려면 홀드-발사를 M번 반복해야 한다. **카운터는 사이클을 넘어 누적된다** — 사이클당 1회인 정책(`own_full_burst`)으로도 M사이클이면 닿고 이후 M회마다 재발동한다(크러스트 실측: 첫 발동 t=30.52s, 180초 16회). 홀드 조작이 없으면 영구 무발동(`charge_hold:N`과 같다). 크러스트 `블렌칭`·`든든한 요리 3` |
 | `core_hit_count:1` | ✅ | `bm.notify("core_hit", ...)` (횟수 없는 형태, `timing == event`로 처리) |
 | `core_hit_count:N` | ✅ | `bm.notify("core_hit", ...)`. `trigger_count_reduce` 버프로 N 감소 가능. **`_timing_match()`는 `core_hit:N`·`core_hit_count:N` 두 표기를 모두 받는다** — `_timing_to_index_key()`가 둘 다 `core_hit`로 접으므로 한쪽만 받으면 그 표기가 조용히 영구 미발동이 된다(2026-09-03 실제로 그랬다. 루드밀라 : 윈터 오너 `눈보라`) |
 | `pellet_hit_count:N` | ✅ | `bm.notify("pellet_hit", ...)`. `trigger_count_reduce` 버프로 N 감소 가능 |
+| `pellet_hit_in_shot:N` | ✅ | **한 발 안의** 펠릿 명중 수 문턱(`일반 공격 1회로 펠릿 N개 이상 명중 시`). 누적 카운터인 `pellet_hit_count:N`과 다른 축이다 — 발사 1회를 단위로 그 발의 명중 펠릿 수가 N 이상인지 본다. 임계값은 이 캐릭터가 실제로 쓰는 값만 본다(`BuffManager.pellet_in_shot_thresholds`, `charge_hold_thresholds`와 같은 모양)이고, 판정과 notify는 `CharState._fire()`의 펠릿 루프 **뒤**에서 그 발의 `hit_count`로 한다. **계산기에 빗나감 모델이 없어(`GAMEPLAY.md` §공격과 명중) 지금은 펠릿이 전부 명중하므로, N ≤ 무기 펠릿 수이면 항상 참 = 발사 1회당 1회다.** 그래도 `on_attack`으로 접지 않는 것은 미스 모델이 들어올 자리를 갈라 두기 위해서다(`on_attack_count:` ↔ `hit_count:`를 가른 것과 같은 이유). 프리바티 : 언카인드 메이드 `사랑 가득 메이드` |
 | `last_bullet` | ✅ | **명중**(`마지막 탄환 명중 시`). `hit_count`와 같은 규약으로 **총구 수만큼** 발동한다. ⬜ 다만 카운터 없는 트리거라 총구 2개면 버프가 두 번 붙는데 **실례가 없어 미검증**이다(유저 판단, 2026-09-04 — 일관성만으로 잡았다). 짝인 발사는 `last_bullet_fire` |
 | `last_bullet_fire` | ✅ | `bm.notify("last_bullet_fire", ...)` |
-| `enemy_death` | ⚠️ | 매칭 로직(`timing == event` 일반 분기) 있음. **기본은 호출처 없음** — 단일 보스 sim에 적 사망 모델이 없다(2026-09-05 정정: 종전 ✅ 표기는 근거 없는 주장이었다). 보스 패턴이 `emit`·`emit_on_destroy`로 적으면 그때만 스쿼드 전원에게 notify한다(`calculator/boss_pattern.py` `BOSS_EVENTS`). 마르차나 : 마린 스터디 `펭군 긴급 출동 2`·`경계 대상 지정 2`·`경계 대상 2` |
+| `enemy_death` | ✅ | 보스 패턴 `summon`의 쫄몹이 **처치**되면 다음 프레임에, **자폭**하면 그 프레임에 쫄몹마다 스쿼드 전원에게 notify한다. 패턴이 닫혀 퇴장한 쫄몹은 사망이 아니다(유저 확인 2026-09-16). 보스 패턴의 `emit`·`emit_on_destroy`로도 적을 수 있다(`calculator/boss_pattern.py` `BOSS_EVENTS`). **패턴이 없으면 무발동** — 보스는 죽지 않는다(2026-09-05 정정: 그때의 ✅ 표기는 호출처가 없어 근거가 없었다). 마르차나 : 마린 스터디 `펭군 긴급 출동 2`·`경계 대상 지정 2`·`경계 대상 2` |
 | `received_hit_count:N` | ✅ | 보스 공격 한 발이 그 니케에게 들어갈 때마다 `timeline._boss_attack()`이 `received_hit`을 notify한다 — 보호막·엄폐물에 막혀도, 무적이어도 나간다. 패턴이 없으면 무발동. `_timing_match`는 `received_hit:N`·`received_hit_count:N` 두 표기를 받는다(2026-09-14 전에는 짧은 표기만 받아 정본 표기 10건이 영구 미발동일 뻔했다). `직접 피격 시 해제` 문형의 해제 트리거로 쓴다 — 로산나 `은신 해제 (직접 피격)`, 델타 : 닌자 시프 `인법 카모플라쥬 해제 (직접 피격)` |
 | `event:full_reload` | ✅ | `bm.notify("event:full_reload", ...)` |
 | `event:cover` | ✅ | `_enter_cover()`에서 `bm.notify("event:cover", ...)`. **엄폐는 컨트롤로만 발생한다** — `control`의 장전컨 정책이나 명시 시퀀스가 엄폐 구간을 열 때만 발동하고, 컨트롤이 꺼진 시뮬에서는 한 번도 발동하지 않는다 (자동 사격이 디폴트라 니케가 스스로 엄폐하지 않기 때문). 정본: `docs/CONTROL.md` |
@@ -488,15 +510,16 @@ stat과 직교하는 **값 산정 기준**이다. `stat` 테이블에 없으므�
 | `event:adjacent_hp_below:N` | ✅ | 자신의 **양 옆 아군** 중 1기가 체력 N% 이하에 도달. `sync_hp()`가 등록된 임계값의 하향 전이를 감지하고, `allies_adjacent:2` 관찰자에게 notify. 플로라 |
 | `event:adjacent_hp_max` | ✅ | 자신의 **양 옆 아군** 중 1기가 **최대 체력 도달**. `sync_hp()`가 hp_pct의 `<100 → 100` **전이(edge)** 를 감지해 `_notify_adjacent_hp_max()`로 발생시킨다(상시 만피는 전이가 없어 무발동). notify의 caster는 이웃이 아니라 **관찰자(효과 소유자)**. 시각은 `self._cur_t`(`tick()`·`notify()`에서 갱신), 재진입은 `_in_hp_edge`로 차단. 최대 체력만 증가 버프(`hp_only_caster_based_pct`·`max_hp_only_pct`)의 만료가 주 발생원. 플로라 |
 | `event:self_down` | ✅ | 쓰러진 본인에게 `bm.notify_down()`. 전투불능인 니케의 스킬은 발동하지 않는데(`_notify` 게이트) 이 이벤트만 예외다 |
-| `event:part_destroy` | ⚠️ | 매칭 로직(`event:xxx`) 있음. **기본은 무발동**이고 발생원이 둘이다 — ① `config["part_break_interval"]`(초, 0/미지정이면 OFF)을 주면 `timeline.simulate`가 그 주기마다 스쿼드 전원에게 notify한다(있지도 않은 파괴를 반복한다). ② 보스 패턴의 표적이 실제로 깨지면 `emit_on_destroy`로 **1회**, 다음 프레임에 나간다(`calculator/boss_pattern.py`). 둘은 독립이라 함께 켜면 양쪽에서 쏜다. 하네스는 ①로 baseline이 잡혀 있다. 아크레인저 블랙 `배터리 충전`, 사쿠라 : 블룸 인 서머 스킬1 전체 |
-| `event:enemy_spawn` | ✅ | `battle_start()` 시점에 모든 스쿼드원에서 notify. 단일 보스 가정 — 전투 시작 시 적 등장 처리 |
+| `event:part_destroy` | ⚠️ | 매칭 로직(`event:xxx`) 있음. **기본은 무발동**이고 발생원이 둘이다 — ① `enemy["part_break_interval"]`(초, 0/미지정이면 OFF)을 주면 `timeline.simulate`가 그 주기마다 스쿼드 전원에게 notify한다(있지도 않은 파괴를 반복한다). ② 보스 패턴의 표적이 실제로 깨지면 `emit_on_destroy`로 **1회**, 다음 프레임에 나간다(`calculator/boss_pattern.py`). ①은 간단 모드(보스 패턴 없음)의 칸이라 **패턴과 같이 적으면 거절한다**(유저 결정 2026-09-15 — 둘이 함께 켜져 이중으로 나가지 않는다 · 2026-09-19 적으로 옮김). 하네스는 ①로 baseline이 잡혀 있다. 아크레인저 블랙 `배터리 충전`, 사쿠라 : 블룸 인 서머 스킬1 전체 |
+| `event:enemy_spawn` | ✅ | `battle_start()` 시점에 모든 스쿼드원에서 notify(보스 등장). 보스 패턴 `summon`이 쫄몹을 띄우면 **쫄몹마다** 한 번씩 더 나간다(⬜ 한꺼번에 나와도 마릿수만큼인지 인게임 미확인) |
 | `event:target_spawn` | ⚠️ | 매칭 로직(`event:xxx`) 있음. 기본은 호출처 없음 — 보스 패턴이 `emit`으로 적을 때만 발생(`calculator/boss_pattern.py` `BOSS_EVENTS`) |
 | `event:heal_received` | ⚠️ | 매칭 로직(`event:xxx`) 있음. `heal_hp_pct` 핸들러에서만 notify 발생 |
 | `event:shield_applied` | ✅ | `shield_from_max_hp_pct` 활성/갱신 시 보호막을 받은 각 대상에게 통지 |
 | `event:shield_consumed` | ✅ | 보스 공격이 보호막을 다 깎은 순간 그 대상에게 — `bm.absorb_shield()` |
 | `event:cover_hit` | ✅ | 보스 공격이 그 니케의 엄폐물을 깎았을 때 — `timeline._boss_attack()`. 패턴이 없으면 무발동(슈가 `블랙 타이푼`) |
+| `event:cover_healed` | ✅ | 「엄폐물 체력 회복 시」 — **그 니케의 엄폐물**이 회복 효과를 받았을 때 그 니케에게. `timeline.handle_cover_heal_pct`가 대상마다 notify한다. **가득 찬 엄폐물에 들어간 회복도 발동한다**(유저 확인 2026-09-14 — `event:heal_received` 오버힐 규칙과 같다). 부서진 엄폐물은 회복되지 않으므로 무발동. 티아 `파충류 애호가`·`파충류 애호가 2` |
 | `event:projectile_destroy` | ⚠️ | 매칭 로직(`event:xxx`) 있음. 기본은 호출처 없음 — 보스 패턴이 `emit`으로 적을 때만 발생(`calculator/boss_pattern.py` `BOSS_EVENTS`) |
-| `event:ally_burst_cast` | ⚠️ | 매칭 로직(`event:xxx`) 있음. notify 호출처 없음 |
+| `event:ally_burst_cast` | ✅ | `timeline._cast_burst()`가 버스트 발동마다 **스쿼드 전원에게** 브로드캐스트한다 — `event:[버프명]`과 같은 규약으로 반응하는 캐릭터 본인을 caster로 넘겨 조건·대상을 자기 기준으로 평가하게 한다. **시전자 자신도 「아군」에 포함된다**(`all_allies`가 시전자 포함인 것과 같은 읽기, 2026-09-15). 재진입 버스트도 `_cast_burst`를 거치므로 한 사이클에 B1·재진입·B2·B3 네 번 발생한다. 루피 : 윈터 쇼퍼 `쇼핑` |
 | `event:stat_applied:dot_dmg_pct` | ✅ | `_activate()` 후처리에서 `dot_dmg_pct` stat 버프 신규/갱신 등록 시 각 target_char에게 `notify("event:stat_applied:dot_dmg_pct", t, tgt)` 발생 |
 | `event:stat_applied:split_dmg_pct` | ✅ | 동일. `split_dmg_pct` stat 버프 적용 시 발생 |
 | `event:state_end:[상태명]` | ✅ | `tick()`에서 버프 만료 시 자동 발생 |
@@ -509,8 +532,8 @@ stat과 직교하는 **값 산정 기준**이다. `stat` 테이블에 없으므�
 | `on_attack` | ✅ | **발사**(`공격 시`·`일반 공격 시`). `_fire()`(자동사격: SG/AR/SMG/MG)와 `_tick_charge()`(풀차지 발사: SR/RL) 두 경로에서 발사 1회당 1회. **명중 계열(`hit_count`·`full_charge_hit`)보다 앞서 발생한다** — 쏘고 나서 맞는 순서이고, 같은 발의 「N회 공격 시」 버프가 「N회 명중 시」 딜에 실리는 근거다(레이 `선두 제압`). 둘 다 `calc_damage` **뒤**라 그 발의 대미지 자체는 어느 쪽도 못 바꾼다 |
 | `first_trigger` | ❌ | 미구현. `max_trigger:1`로 대체 가능 |
 | `multi_hit:N` | ✅ | `_timing_match`에 분기 있음. `bm.notify("multi_hit:N", ...)` — 타임라인에서 동시 명중 감지 필요 |
-| `part_hit_count:N` | ✅ | `notify_team_hit("squad_part_hit", t, attacker)` 스쿼드 브로드캐스트. `_team_hit_index` 경로. `enemy.has_parts=True`일 때 비코어 히트마다 발생. `_activate(eff, attacker, t)`로 target:"self"=발사 아군 |
-| `body_hit_count:N` | ✅ | `notify_team_hit("squad_body_hit", t, attacker)` 스쿼드 브로드캐스트. `_team_hit_index` 경로. `enemy.has_parts=False`(기본값)일 때 비코어 히트마다 발생 |
+| `part_hit_count:N` | ✅ | `notify_team_hit("squad_part_hit", t, attacker)` 스쿼드 브로드캐스트. `_team_hit_index` 경로. `enemy.has_parts=True`일 때 비코어 히트마다 발생. **좌표 모드에서는 착탄점이 파츠(parts 표적)인 펠릿마다**(저지원·코어는 아니다 — `CharState._coord_pellet`). `_activate(eff, attacker, t)`로 target:"self"=발사 아군 |
+| `body_hit_count:N` | ✅ | `notify_team_hit("squad_body_hit", t, attacker)` 스쿼드 브로드캐스트. `_team_hit_index` 경로. `enemy.has_parts=False`(기본값)일 때 비코어 히트마다 발생. **좌표 모드에서는 착탄점이 표적 없는 코어 밖 본체인 펠릿마다** |
 | `charge_hold:N` | ✅ | `CharState._notify_charge_hold()`(`timeline.py`)가 `_charge_full_t`(풀차지 도달 래치)로 유지 시간을 재서 notify한다. 임계값은 `BuffManager.charge_hold_thresholds(caster)`가 그 캐릭터의 효과에서 뽑는다 — `_timing_match`가 문자열 완전 일치라 원문 표기(`0.5`)를 그대로 보낸다. **판정은 한 차지에 1회**(`_charge_hold_fired`, 차지 재시작 시 리셋) — 계속 들고 있어도 재판정하지 않는다. **홀드 조작이 없으면 풀차지 즉시 발사라 영구 무발동**이다: `control["sequence"]`의 `hold`, 정책 `own_full_burst`·`charge_hold_after_fb` 중 하나가 필요하다 — 정본: `docs/CONTROL.md §홀드`. **CDN `input_type`이 `DOWN_Charge`인 6명은 홀드 자체가 불가**(차지가 차면 자동 발사)라 구조적으로 발동할 수 없다 — 홀드를 지정하면 `CharState.__init__`이 즉시 실패시킨다. 밀크 : 블루밍 바니 `부끄러움` |
 | `weapon_hit:[name]` | ✅ | `_timing_match`에 분기 있음. notify 호출처는 `_handle_damage_eff()` **한 곳뿐**으로, `[name]`은 **named damage 효과**(발사체 등)의 이름이다 — 그 효과가 명중할 때마다 발생한다(라피 : 레드 후드 `부착형 유탄 4`). **`weapon_change` 모드의 사격은 이 이벤트를 쏘지 않는다** (`_tick_weapon_change()`에 호출처 없음, 2026-08-13 확인) → 모드의 매 발마다 붙는 효과는 `hit_count:1` + `self_state:[모드명]`으로 센다 |
 | `feather_tick` | ✅ | **아인 전용**. 니어 페더 소환체의 공격 주기 틱. `tick()`이 `state["feathers"]`를 돌며 `notify("feather_tick", ...)`. `_timing_match`는 `timing == event` 일반 분기를 그대로 탄다(별도 분기 불필요). 주기가 고정이 아니라 생존 수 n에 대해 `base × mult^(n-1)`이고, **다음 발사는 직전 예약 시각 기준**으로 잡는다(프레임 양자화 드리프트 방지). 만료로 수가 줄어도 예약된 시각은 바뀌지 않는다 — 재소환(`feather_refresh`)만 초기화한다. 정본: `docs/scenarios/아인.md §니어 페더 메커니즘` |
@@ -534,17 +557,18 @@ stat과 직교하는 **값 산정 기준**이다. `stat` 테이블에 없으므�
 | `ally_hp_max` | — | ❌ | 미구현. 분기 없음 |
 | `during_charge` | 양쪽 모두 | ✅ | `state["charging"][caster]` |
 | `during_shield` | 양쪽 모두 | ✅ | 조건 평가 대상에게 만료 전 `shield_from_max_hp_pct` 보호막이 하나 이상 있으면 참 |
+| `self_cover_alive` | 양쪽 모두 | ✅ | 자신의 엄폐물이 살아 있는가 — `bm.cover_alive()`(`state["cover_hp"][caster] > 0`). `_RUNTIME_COND_PREFIXES` 등록 — 엄폐물은 보스 공격(`enemy.patterns`의 `attack`)에만 부서지고, 부서지는 순간 `bm.break_cover()`가 집계 캐시를 비워 같은 프레임부터 꺼진다. 패턴이 없으면 늘 참이다. 슈가 `블랙 타이푼 4` |
 | `during_reload` | — | ❌ | 미구현. `state["reloading"]` 연동 필요 |
 | `burst_casted` | `_condition_ok` 전용 | ✅ | `state["burst_casted"][caster]` |
 | `burst_not_casted` | `_condition_ok` 전용 | ✅ | `state["burst_casted"][caster]` |
 | `back_row` | `_condition_ok` 전용 | ✅ | 스쿼드 인덱스 1 또는 3 = 후열 (포지션 2번, 4번) |
 | `squad_ally_exists` | `_condition_ok` 전용 | ✅ | 소속 스쿼드(`parsed_nikke["squad"]`, 카운터스·이지스 등)가 같은 아군이 자신 외에 편성돼야 True. 의상 버전도 원본과 같은 스쿼드일 수 있다(라피 : 레드 후드 = `Counters`). 스쿼드가 없는 더미(`test_B*`)는 False |
-| `focusing` | — | ❌ | 미구현. `focus_fire` stat과 연동 필요 |
+| `focusing` | 양쪽 모두 | ✅ | 「자신이 포커싱 상태일 때」 = 시전자가 **카메라를 잡고 있다**(`state["camera"]` — 조율이 프레임마다 옮기고, 조작이 없으면 정적 유도값). `_RUNTIME_COND_PREFIXES`에 있어 카메라가 옮으면 켜졌다 꺼진다(2026-09-18 전에는 재평가 대상이 아니라 늘 켜져 있었다 — 효과 `focus_fire`가 무영향이라 딜 불변). 리틀 머메이드 `버블 오더` |
 | `not_core` | `_condition_ok` 전용 | ✅ | **트리거를 일으킨 그 탄**이 비코어인가. `_fire()`·`_tick_charge()`가 `hit_count` notify에 ctx `core_frac`(그 탄의 코어 확률 — 펠릿 판정을 총구 단위로 평균, `timeline._bullet_core_fracs`)을 싣는다. 확률 판정 모드는 0/1이라 그대로, 기대값 모드는 `prob:`와 같은 규약으로 `(1 − core_frac)`을 (효과, 캐스터)별로 누적해 1.0을 넘길 때 발동한다. ctx가 없는 경로(명중 외 트리거)는 비코어로 본다. 길로틴 : 윈터 슬레이어 `경험치 2`(`hit_count:6`) |
 | `core_hit_count:1` | — | ❌ | 미구현. timing이 아닌 condition으로 쓰일 때 |
 | `self_state:상태명` | 양쪽 모두 | ✅ | `_has_self_state()` 단일 창구. `_active` 버프 **+ `state["weapon_change"]` 무기 변경 모드명**을 함께 본다 — 모드는 `_active`에 등록되지 않으므로 이걸 빼면 `self_state:저격 모드`류가 영구 거짓이 된다. 나유타 `위선 5/6`(`self_state:기억 연소`), 신데렐라 : 크리스탈 웨이브 `모드 스왑 2`. **상태명이 총칭 `무기 변경`(`WEAPON_CHANGE_STATE`)이면 모드명 대조가 아니라 "아무 모드든 켜져 있는가"로 읽는다** — 원문이 모드 이름 대신 「자신이 무기 변경 상태라면」이라고만 쓰는 경우다(목단 `다 덤벼! 2`. 2026-08-28 이전에는 모드명으로만 대조해 영구 거짓이었고, 고친 뒤 목단 개인 딜 +64%). **상태 이름은 반드시 지속 효과에 붙어야 한다** — instant에만 붙으면 조용히 영구 거짓이 된다(`docs/PARSING.md` §상태의 담체, `doclint` 검사 K).<br>**참조되는 버프 자신의 발동 조건은 보지 않는다 — 의도다.** `_by_name`으로 `_active` 멤버십과 `target_chars`만 보고 그 버프의 `trigger.condition`은 읽지 않는다. 조건은 *부여 게이트*이고 `self_state:`는 *마커가 있는가*를 묻는 것이라 층이 다르다. 재평가를 넣으면 ① 밀크 : 블루밍 바니 `부끄러움`은 자기 condition이 `not_self_state:부끄러움`이라 **자기 이름을 봐서** 재귀가 종료하지 않고, ② 프리카 `무대 파트 : 보컬`(민트에게 거는 `duration: -1` 마커, 조건 `self_state:퍼포먼스`)은 `퍼포먼스`가 25초짜리라 원문 「해제 불가」와 반대로 25초 뒤 꺼지며, ③ 소다 : 트윙클링 바니 `시간 연장 I·II`(조건 `self_stack_above:골든 칩:10/20`, `duration: -1`)는 스택이 빠지는 순간 `fullburst_duration` 연장이 도중에 풀린다. **마커의 유효 구간을 좁히려면 조건이 아니라 그 마커의 `duration`을 고칠 것.** 영향 범위(조건부 영구 마커를 참조하는 10건 열거)와 미수정 근거는 `docs/PARSING-CHARS.md` 엠마 : 택티컬 업 스킬1·2 |
 | `not_self_state:상태명` | 양쪽 모두 | ✅ | 위와 같은 창구의 부정. 신데렐라 : 크리스탈 웨이브 `모드 스왑 3` |
-| `target_state:상태명` | 양쪽 모두 | ✅ | 단일 적 가정: `"__enemy__"`가 target_chars에 있는 활성 효과로 확인. **게이지에 쓰지 않는다** — 게이지는 `state["gauges"][caster]`에 살아 `_has_target_state()`에 절대 안 걸린다. `[게이지명] 보유 상태라면`은 `gauge_above:게이지명:1`이다(`PARSING.md` 4-2). 솔린 : 프로스트 티켓 `열차 탑승 도와줄게!`가 `target_state:티켓`이라 영구 거짓이었다(2026-09-05 수정) |
+| `target_state:상태명` | 양쪽 모두 | ✅ | 적(`"__enemy__"` 또는 쫄몹 id)이 target_chars에 있는 활성 효과로 확인. 조건에는 「지금 맞는 적」 문맥이 없어 쫄몹이 있으면 **어느 적에게든** 붙어 있으면 참이다(⬜ 근사). **게이지에 쓰지 않는다** — 게이지는 `state["gauges"][caster]`에 살아 `_has_target_state()`에 절대 안 걸린다. `[게이지명] 보유 상태라면`은 `gauge_above:게이지명:1`이다(`PARSING.md` 4-2). 솔린 : 프로스트 티켓 `열차 탑승 도와줄게!`가 `target_state:티켓`이라 영구 거짓이었다(2026-09-05 수정) |
 | `not_target_state:상태명` | 양쪽 모두 | ✅ | `target_state:`의 부정형. `_has_target_state()` 단일 창구를 공유한다. **미구현 시 조용히 항상 통과**하므로(조건 미매칭은 `return True`로 빠진다) 부여 조건으로 쓰면 매 히트 재부여되어 루프가 폭주한다 — 팬텀 구현 전 실측 딜 비중 77%. 팬텀 `예고장`·`괴도의 단검` |
 | `target_stunned` | `_condition_ok` 전용 | ✅ | 대상이 기절 상태인지. `is_stunned("__enemy__")` — 버프 *이름*이 아니라 `stat == "stun"` 유무를 보므로 기절을 건 효과의 이름·주체와 무관하다. 기절은 이름 있는 상태가 아니므로 `target_state:`를 쓰지 않는다(프리바티 `LD 어설트 3` 기본 판본). `_RUNTIME_COND_PREFIXES`에 넣지 않는다 — 발동 시점 게이트다 |
 | `target_code:[코드]` | `_condition_ok` 전용 | ✅ | 대상(적)의 속성 코드 확인. `self.state["enemy"]["code"]`와 비교. 코드 미설정(빈 문자열)이면 항상 통과 |
@@ -557,9 +581,9 @@ stat과 직교하는 **값 산정 기준**이다. `stat` 테이블에 없으므�
 | `no_defender_ally` | `_condition_ok` 전용 | ✅ | 자신 제외 스쿼드에 `parsed_nikke["class"] == "방어형"`인 아군이 **없어야** True. `has_defender_ally`와 한 분기에서 함께 판정한다 |
 | `has_defender_ally` | `_condition_ok` 전용 | ✅ | 위의 부정. **둘은 같은 원문의 배타 분기라 한쪽만 구현하면 양쪽이 동시에 성립한다** — 2026-09-02 이전이 그 상태였고, 델타 : 닌자 시프 `인법 카모플라쥬`(보호막·주목)와 `인법 카모플라쥬 2`·`인법 인젝션`이 전투 시작에 전부 걸렸다. 스쿼드 구성은 전투 중 불변이므로 `_RUNTIME_COND_PREFIXES` 대상이 아니다 |
 | `no_burst1_ally` | `_condition_ok` 전용 | ✅ | `state["burst_stages"]` |
-| `enemy_count_below:N` | 양쪽 모두 | ✅ | 랩쳐/적 N기 이하. 단일 보스 count=1 → 1<=N 항상 True. 마르차나 : 마린 스터디 |
-| `enemy_count_above:N` | 양쪽 모두 | ✅ | 랩쳐/적 N기 이상. 단일 보스 count=1 → N>=2면 False, 무발동. **`_RUNTIME_COND_PREFIXES`에도 등록**(2026-08-08) — `passive` 버프는 조건 미충족이어도 등록된 뒤 게이팅을 runtime 재평가에만 의존하므로, 여기 없으면 보스전에서 그대로 적용된다(맥스웰 `일렉트릭 샷`). 마르차나 : 마린 스터디, 맥스웰 |
-| `optimal_range` | `_condition_ok` 전용 | ✅ | 적정 사거리 여부. 정본은 **적 스펙 `optimal_range_weapons`**로, ③ 고정 +30%를 태우는 `timeline`의 `is_optimal_range`와 같은 판정이다. 시전자 무기군은 로스터 값(`parsed_nikke["weapon_type"]`)을 보므로 무기 변경 모드는 반영하지 않는다 — 현재 사용처(에이드 : 에이전트 바니 `요원의 시선`·`요원의 움직임`)에 모드 전환이 없다. **기본값이 빈 목록이라 스쿼드 스펙이 무기군을 명시하지 않으면 무발동**이다 |
+| `enemy_count_below:N` | 양쪽 모두 | ✅ | 랩쳐/적 N기 이하. 적 수 = 보스 1 + 산 쫄몹(`state["enemy_count"]`, 프레임 맨 앞). 쫄몹이 없으면 1 → 1<=N 항상 True. 마르차나 : 마린 스터디 |
+| `enemy_count_above:N` | 양쪽 모두 | ✅ | 랩쳐/적 N기 이상. 적 수는 위와 같다. 쫄몹이 없으면 1 → N>=2면 False, 무발동. **`_RUNTIME_COND_PREFIXES`에도 등록**(2026-08-08) — `passive` 버프는 조건 미충족이어도 등록된 뒤 게이팅을 runtime 재평가에만 의존하므로, 여기 없으면 보스전에서 그대로 적용된다(맥스웰 `일렉트릭 샷`). 마르차나 : 마린 스터디, 맥스웰 |
+| `optimal_range` | `_condition_ok` 전용 | ✅ | 적정 사거리 여부. 판정의 정본은 **`buff_manager.in_optimal_range`**로, ③ 고정 +30%를 태우는 `timeline`의 `is_optimal_range`와 같은 함수다 — 보스 거리(`enemy.distance`)가 없으면 **적 스펙 `optimal_range_weapons`**에 시전자 무기군이 있는가, 있으면 시전자의 적정 구간(CDN bonusrange · 적정 최대·최소 사거리 ▲ 반영)에 거리가 드는가. 시전자 무기군은 로스터 값(`parsed_nikke["weapon_type"]`)을 보므로 무기 변경 모드는 반영하지 않는다 — 현재 사용처(에이드 : 에이전트 바니 `요원의 시선`·`요원의 움직임`)에 모드 전환이 없다. **기본값이 빈 목록·거리 없음이라 스쿼드 스펙이 둘 다 안 적으면 무발동**이다 |
 | `core_hit` | `_condition_ok` 전용 | ✅ | 대상이 코어 보유 적일 때. **`enemy["core_px"] >= 1` 기준**(0이면 코어 없음). 기본공격의 코어히트는 명중률·탄착군 확률이지만 이 condition이 붙은 효과는 "코어가 활성화된 적" 대상의 **확정 발동**이다 — 확률 판정을 걸지 않는다. 기본값 `core_px = 0`이므로 코어 없는 보스에서는 정상적으로 무발동. 리버렐리오 `차분한 수심 2`, 신데렐라 : 크리스탈 웨이브 `모드 스왑 3` |
 | `gauge_mod:게이지명:mod:나머지` | `_condition_ok` 전용 | ✅ | 게이지값 `% mod == 나머지`일 때 발동. 민트, 아르카나 : 포츈 메이트 |
 | `trigger_hit_crit` | `_condition_ok` 전용 | ✅ | 트리거를 발생시킨 히트가 **실제 크리티컬 롤에 성공**했는가. named damage 명중(`hit_count:[이름]:N`)과 짝으로 쓴다. `prob:` 확률 근사가 아니라 그 히트의 롤 결과를 그대로 읽는다 — 근사로 대체하면 원래 딜과 상관관계가 끊긴다(유저 결정, 2026-08-17). 율리아 `마르카토 2` |
@@ -623,23 +647,25 @@ lazy resolve: 버프 반영 스탯 기준 정렬 필요 target → `_activate()`
 | `"allies_burst3"` | ❌ | ✅ | 기본 버스트 단계가 Step 3인 아군 전체. `burst_stages` 기준 |
 | `"allies_top_base_charge_time:N"` | ❌ | ✅ | 기본(버프 제외) 차지 시간이 가장 긴 아군 N기. `parsed_nikke["charge_time"]` 기준 고정 속성이라 lazy resolve 불필요. 차지 무기 아군이 없으면 빈 리스트, 동률이면 스쿼드 입력 순서. 마나 `매터 시그마 4` |
 | `"allies_down_top_atk_excl:N"` | ❌ | ✅ | 자신을 제외한 전투불능 아군 중 최종 공격력 최고 N기. **`_resolve_target()`이 전투불능 아군을 빼는 규칙의 유일한 예외**(`allies_down_` 접두사). 마나 `매터 감마 3` |
-| `"allies_with_buff:버프명"` | ❌ | ✅ | 해당 이름의 버프가 활성인 아군 전체. `enemies_with_buff:`의 아군판(그쪽은 `__enemy__` 센티널이라 실질 필터가 없다). **부여 시점 스냅샷(비lazy)으로 확정** — "부여 순간 조건을 만족한 아군에게 준다"는 게임 시맨틱에 가깝다. 판정은 `_has_self_state()`를 재사용해 weapon_change 모드도 상태로 인정. 레이 (가칭) `섬멸 지원 4~6` |
+| `"allies_without_buff:버프명"` | ❌ | ✅ | 해당 이름의 버프가 **활성이 아닌** 아군 전체. `allies_with_buff:`의 여집합이고 판정도 같은 `_has_self_state()`를 쓴다. 원문 「[상태명] 상태가 아닌 아군 전체에게」 — 재부여를 막는 대상 필터라, **같은 clause 안에서 그 상태를 부여하는 항목보다 다른 항목을 앞에 두어야 한다**(부여가 먼저 끝나면 뒤 항목의 대상이 0명이 된다). 크러스트 `든든한 요리` |
+| `"allies_random_with_debuff:N"` | ❌ | ✅ | **해로운 효과를 실제로 보유한 아군** 중 무작위 N기(`_has_harmful()`). `allies_random:N`(자신 제외 무작위)과 달리 시전자를 빼지 않고, `polarity`가 `harmful`·`harmful_irremovable`인 활성 버프 보유를 먼저 거른다. **지연 resolve 대상이 아니다** — 「지금 디버프를 가진 사람」이 곧 부여 시점 판정이다. 보유자가 N보다 적으면 있는 만큼, 0명이면 무발동. 보스 공격 패턴이 없으면 아군에게 걸리는 harmful이 드물어 대체로 무발동이다. 코코아 `프로 종이접기 2` |
+| `"allies_with_buff:버프명"` | ❌ | ✅ | 해당 이름의 버프가 활성인 아군 전체. `enemies_with_buff:`의 아군판(그쪽은 쫄몹이 없으면 `__enemy__` 센티널이라 실질 필터가 없다). **부여 시점 스냅샷(비lazy)으로 확정** — "부여 순간 조건을 만족한 아군에게 준다"는 게임 시맨틱에 가깝다. 판정은 `_has_self_state()`를 재사용해 weapon_change 모드도 상태로 인정. 레이 (가칭) `섬멸 지원 4~6` |
 | `"allies_burst3_persona_excl_self"` | ❌ | ✅ | 자신을 제외한 · 기본 버스트 단계 Step 3 · `persona_state` 보유 아군 전체. `allies_burst3` ∩ `persona_state` 보유 − 자신. 판정은 `allies_with_buff:`와 같은 부여 시점 스냅샷. 퀸(마코토) `배턴 터치`, 유키코 `추격` |
 | `"allies_burst_casted_burst3"` | ❌ | ✅ | 직전에 버스트를 사용한 아군 중 기본 버스트 단계 Step 3. `all_allies_burst_casted` ∩ `allies_burst3`. 아래 무기판과 같은 취지 — `burst_casted`를 condition으로 두면 시전자 기준이라 대상 필터가 안 된다. 에이다 `은밀한 지원 1~3` |
 | `"allies_burst_casted_weapon:무기유형"` | ❌ | ✅ | 직전에 버스트를 사용한 아군 중 해당 무기 소지자 전체. `all_allies_burst_casted`(`state["burst_casted"]`)와 `allies_weapon:X`(`parsed_nikke["weapon_type"]`)의 AND. 고정 속성 + 사이클 단위 플래그라 lazy resolve 불필요. 레이 (가칭) `정비 및 보급` |
-| `"target"` / `"target_body"` / `"same_target"` | ❌ | ✅ | `__enemy__` 센티널 반환. 타임라인이 실제 처리 |
-| `"all_enemies"` / `"enemies_in_range"` / `"enemies_nearest_in_range"` | ❌ | ✅ | `__enemy__` 센티널 반환 |
-| `"enemies_random:N"` | ❌ | ✅ | `__enemy__` 센티널 반환 |
-| `"enemies_nearest:N"` | ❌ | ✅ | `__enemy__` 센티널 반환 |
-| `"enemies_top_atk:N"` | ❌ | ✅ | `__enemy__` 센티널 반환 |
-| `"enemies_top_def:N"` | ❌ | ✅ | `__enemy__` 센티널 반환 |
-| `"enemies_lowest_def:N"` | ❌ | ✅ | `__enemy__` 센티널 반환 |
-| `"enemies_lowest_hp:N"` | ❌ | ✅ | `__enemy__` 센티널 반환 |
-| `"enemies_top_hp:N"` | ❌ | ✅ | 최종 최대 체력 최고 적 N기. `_resolve_target()` 일반 `enemies` prefix 처리로 `__enemy__` 센티널 반환(단일 보스). 별도 분기 불필요. 마르차나 : 마린 스터디 |
+| `"target"` / `"target_body"` / `"same_target"` | ❌ | ✅ | `__enemy__` 센티널 반환. 타임라인이 실제 처리. **아래 적 대상 전부 — 보스 패턴 `summon`의 쫄몹이 살아 있으면 `bm.enemy_resolver`가 적 id로 푼다**(정본 `calculator/boss_pattern.py` §쫄몹). 이 셋은 조준 — 딜은 `share`로 쪼개고, 효과는 가중치 최대 1기 |
+| `"all_enemies"` / `"enemies_in_range"` / `"enemies_nearest_in_range"` | ❌ | ✅ | `__enemy__` 센티널 반환. 쫄몹이 있으면 `all_enemies`·`enemies_in_range`는 전원(범위는 좌표가 없어 전원), `enemies_nearest_in_range`는 조준 |
+| `"enemies_random:N"` | ❌ | ✅ | `__enemy__` 센티널 반환. 쫄몹이 있으면 산 적 중 무작위 N기(보스 공격 난수열 — 기대값 모드 고정 시드) |
+| `"enemies_nearest:N"` | ❌ | ✅ | `__enemy__` 센티널 반환. 쫄몹이 있으면 조준 — N ≥ 2면 조준 가중치 순 N기 |
+| `"enemies_top_atk:N"` | ❌ | ✅ | `__enemy__` 센티널 반환. 쫄몹이 있으면 공격력 순(보스 `enemy["atk"]` · 쫄몹은 공격의 atk) |
+| `"enemies_top_def:N"` | ❌ | ✅ | `__enemy__` 센티널 반환. 쫄몹이 있으면 보스 먼저(쫄몹 방어력 모델 없음) |
+| `"enemies_lowest_def:N"` | ❌ | ✅ | `__enemy__` 센티널 반환. 쫄몹이 있으면 쫄몹 먼저 |
+| `"enemies_lowest_hp:N"` | ❌ | ✅ | `__enemy__` 센티널 반환. 쫄몹이 있으면 남은 체력 낮은 쫄몹 순, 그다음 보스 |
+| `"enemies_top_hp:N"` | ❌ | ✅ | 최종 최대 체력 최고 적 N기. `_resolve_target()` 일반 `enemies` prefix 처리로 `__enemy__` 센티널 반환. 쫄몹이 있으면 보스 먼저. 마르차나 : 마린 스터디 |
 | `"target_and_nearby:N"` | ❌ | ✅ | `__enemy__` 센티널 반환 |
-| `"enemies_with_buff:버프명"` | ❌ | ✅ | `__enemy__` 센티널 반환 |
-| `"enemies_code:코드"` | ❌ | ✅ | `__enemy__` 센티널 반환. 단일 적 시뮬레이터에서는 코드 필터 무시 |
-| `"enemies_lowest_hp_code:코드:N"` | ❌ | ✅ | `__enemy__` 센티널 반환. 단일 적 시뮬레이터에서는 코드 필터 무시 |
+| `"enemies_with_buff:버프명"` | ❌ | ✅ | `__enemy__` 센티널 반환. 쫄몹이 있으면 그 효과가 붙은 적(`bm.enemy_has_state`), 없으면 보스 |
+| `"enemies_code:코드"` | ❌ | ✅ | `__enemy__` 센티널 반환. 코드 필터 무시 — 쫄몹 코드가 없어 쫄몹이 있어도 보스 |
+| `"enemies_lowest_hp_code:코드:N"` | ❌ | ✅ | `__enemy__` 센티널 반환. 코드 필터 무시 — 쫄몹이 있어도 보스 |
 | `"all_projectiles"` | ❌ | ❌ | 발사체 모델 없음. 빈 리스트 반환 |
 | `"self_cover"` | ❌ | ❌ | 미구현. 빈 리스트 반환 |
 | `"allies_lowest_cover_hp:N"` | ❌ | ✅ | 엄폐물 체력 **남은 비율** 오름차순(동률은 스쿼드 순서). 부서진 엄폐물은 되살아나지 않으므로 후보에서 뺀다. 리타 `볼트 부스트` |

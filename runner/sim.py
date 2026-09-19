@@ -8,6 +8,7 @@
     python -m runner.sim "..." --expected          # 크리·코어히트를 기대값으로 (1회로 결정론적)
     python -m runner.sim "..." --view buff --char "라피 : 레드 후드"
     python -m runner.sim "..." --profile me        # 고정 스펙 대신 내 계정의 실제 육성으로
+    python -m runner.sim "..." --boss 스크립트.json --view boss   # 보스 패턴 (runner/boss.py)
 
 캐릭터 이름에 콤마는 없지만 콜론·공백은 있다 (`라피 : 레드 후드`).
 구분자는 콤마이며 앞뒤 공백은 자동으로 벗겨진다.
@@ -30,9 +31,10 @@ if hasattr(sys.stderr, "reconfigure"):
 
 from calculator.sim_result import print_team_analysis
 from calculator.timeline import _ANCHORS, simulate
+from runner import boss as boss_input
 from runner import spec as char_spec
 
-VIEWS = ("summary", "breakdown", "analysis", "burst", "buff", "hits", "gauge")
+VIEWS = ("summary", "breakdown", "analysis", "burst", "buff", "hits", "gauge", "boss")
 
 
 def main() -> None:
@@ -47,6 +49,7 @@ def main() -> None:
             "  burst      버스트 사이클 이벤트 전체\n"
             "  buff       풀버스트 진입 시점 버프 스냅샷\n"
             "  hits       히트 목록 (재장전·버스트 인터리브)\n"
+            "  boss       보스 패턴 흐름 · 니케 피격 (--boss와 같이 쓴다)\n"
         ),
     )
     ap.add_argument("squad", help="캐릭터 이름 콤마 구분 (1~5명)")
@@ -79,15 +82,35 @@ def main() -> None:
         help="스킬 미파싱 캐릭터를 스킬 0개로 돌린다. 파싱 전 신캐의 스탯·무기만 볼 때만 쓴다 "
              "(기본은 에러 — 별칭을 정식 명칭으로 못 바꾼 경우가 대부분이다)",
     )
+    ap.add_argument(
+        "--boss", metavar="프리셋|파일.json",
+        help="보스를 바꾼다. `.json`으로 끝나면 보스 스크립트 파일(적 dict — patterns·atk·def·code, "
+             "`preset`·`skill`·`part`로 프리셋 참조), 아니면 data/boss_presets.json의 프리셋 이름 "
+             "(스탯·속성만, 패턴 없음). 아래 --enemy-def 등은 그 위에 덮는다. "
+             "예: --boss \"솔로 레이드 S40\" / --boss 스크립트.json --view boss (runner/boss.py)",
+    )
     ap.add_argument("--enemy-def", type=int, help="적 방어력")
     ap.add_argument("--enemy-code", choices=["풍압", "수냉", "작열", "전격", "철갑"],
                     help="적 속성 코드. 우월 코드(DealForm ⑦)·target_code 조건에 반영")
     ap.add_argument("--core-px", type=float, help="코어 직경(px). 0이면 코어 없음")
+    ap.add_argument(
+        "--distance", type=float,
+        help="보스 거리. 주면 적정거리를 무기군 목록 대신 니케마다 적정 구간(CDN bonusrange — AR 25~45 · "
+             "SR 45~100 · SMG 15~35 · SG 0~25 · MG 35~55 · RL 없음)과 비교한다. 적정 최대·최소 사거리 ▲ 반영 "
+             "(calculator/boss_pattern.py §적정거리)",
+    )
+    ap.add_argument(
+        "--aim", action="append", metavar="이름:표적[:키=값,...]",
+        help="에임 컨트롤 — 좌표 모드 보스(enemy.coord)의 표적(또는 core)을 겨눈다. 카메라를 요구하는 조작이라 "
+             "조율을 탄다. 키는 priority(기본 저지원·벌칙 파츠 high · 그 밖 mid) · window · anchor·offset·len. "
+             "예: --aim \"목단:알집\" --aim \"앨리스:저지원:priority=high\" (docs/CONTROL.md §에임)",
+    )
     ap.add_argument("--has-parts", action="store_true", help="파괴 가능 파츠 보유 보스로 설정")
     ap.add_argument(
         "--part-break-interval", type=float, default=0.0,
-        help="파츠 파괴 주기(초). 0이면 무발동(기본). `event:part_destroy`에 반응하는 "
-             "캐릭터(아크레인저 블랙 배터리 충전)를 켜고 끄는 스위치",
+        help="파츠 파괴 주기(초) — 간단 모드 보스의 칸(enemy.part_break_interval). 0이면 무발동(기본). "
+             "`event:part_destroy`에 반응하는 캐릭터(아크레인저 블랙 배터리 충전)를 켜고 끄는 스위치. "
+             "패턴 모드 보스(--boss 스크립트)에는 못 준다 — 파괴는 표적이 실제로 깨질 때 나간다",
     )
     ap.add_argument(
         "--mode-swap", action="append",
@@ -232,10 +255,15 @@ def main() -> None:
         config["no_burst_char"] = args.no_burst.strip()
     if args.duration:
         config["duration"] = args.duration
-    if args.part_break_interval:
-        config["part_break_interval"] = args.part_break_interval
 
     enemy: dict = {}
+    boss_label = None
+    if args.boss:
+        try:
+            enemy, boss_label = boss_input.load_boss(args.boss.strip())
+        except ValueError as e:
+            print(e)
+            sys.exit(2)
     if args.enemy_def is not None:
         enemy["def"] = args.enemy_def
     if args.enemy_code:
@@ -244,6 +272,10 @@ def main() -> None:
         enemy["core_px"] = args.core_px
     if args.has_parts:
         enemy["has_parts"] = True
+    if args.part_break_interval:
+        enemy["part_break_interval"] = args.part_break_interval
+    if args.distance is not None:
+        enemy["distance"] = args.distance
 
     swap = {c.strip() for c in (args.mode_swap or [])}
     unknown = swap - set(members)
@@ -378,6 +410,19 @@ def main() -> None:
                 hd["lead"] = float(extra)
         controls.setdefault(parts[0], {})["hold"] = hd
 
+    # 에임 — 좌표 모드 보스의 표적을 겨눈다. 같은 캐릭터에 여러 번 주면 준 순서대로(먼저 맞는 항목이 이긴다)
+    for spec in (args.aim or []):
+        parts = _split(spec.strip(), 2)
+        if len(parts) < 2 or not parts[1].strip():
+            print(f"--aim 은 겨눌 표적이 필요하다: {spec!r}")
+            sys.exit(2)
+        entry = {"at": parts[1].strip()}
+        for kv in (parts[2].split(",") if len(parts) > 2 else []):
+            k, _, v = kv.partition("=")
+            k = k.strip()
+            entry[k] = float(v) if k in ("offset", "len") else v.strip()
+        controls.setdefault(parts[0], {}).setdefault("aim", []).append(entry)
+
     # 스펙 합성은 runner/spec.py — 기본 육성 스펙 → 캐릭터별 기본 레이어
     # (data/char_defaults.json: 앨리스 톡톡이 등) → 아래 CLI 인자.
     # `--tap` 등을 주면 그 캐릭터의 기본 컨트롤 위에 얹힌다.
@@ -387,6 +432,8 @@ def main() -> None:
     auto = {a.strip() for a in (args.auto or [])}
     if "__all__" in auto:
         auto = set(members)
+        # 전원 오토 = 레이어 1 — 좌표 모드의 저지 우선 타격(레이어 2)도 끈다(에임을 안 옮긴다)
+        config["aim_interrupt"] = False
     if auto - set(members):
         print(f"--auto 대상이 스쿼드에 없다: {sorted(auto - set(members))}")
         sys.exit(2)
@@ -443,6 +490,9 @@ def main() -> None:
     print(f"스쿼드: {', '.join(members)}{seed_note}")
     # 기준선 이탈은 언제나 출력에 싣는다 — 수치만 보고 기본 스펙 결과로 오해하지 않도록.
     print(char_spec.format_deviations(squad, profile=profile))
+    # 보스도 기본 적이 아니면 같은 자리에 싣는다 — --enemy-def 등이 덮은 뒤의 최종값이다.
+    if boss_label is not None:
+        print(boss_input.describe(enemy, boss_label))
     # 조작자 관점 — 카메라는 하나뿐이라 겹친 조작은 그만큼 비현실적인 상한이다
     # (docs/CONTROL.md §조작자는 한 명). 이탈 보고와 같은 이유로 언제나 싣는다.
     if result.log is not None and result.log.control_log:
@@ -467,6 +517,8 @@ def main() -> None:
         print(result.hit_summary(chars))
     elif args.view == "gauge":
         print(result.log.gauge_summary())
+    elif args.view == "boss":
+        print(result.boss_summary())
 
 
 if __name__ == "__main__":

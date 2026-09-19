@@ -120,7 +120,7 @@ print(json.dumps(data['캐릭터명'], ensure_ascii=False, indent=2))
 | `fixed_value` | ✅* | buff/damage/instant | 레벨 무관 고정 수치. `values`와 둘 중 하나 필수. 둘 다 쓰지 않는다 |
 | `duration` | buff: ✅ / damage·instant: 선택 | buff, periodic damage | 지속시간(초). **buff type은 언제나 필수**. 종료 조건이 없으면 `-1`(무한)이다 — `null`을 남기지 않는다. `null`은 "아직 정하지 못했다"는 미해결 표식이고, 엔진은 `null`과 `-1`을 똑같이 무한으로 읽으므로(`buff_manager.py`) 남겨 두면 조용히 굳는다. 원문에 유지 블록이 아예 없는 stat(`fullburst_duration` — 값을 풀버스트 진입 시점에 읽으려고 buff로 보관한다)도 `-1`로 적는다. 어느 쪽인지 판단이 안 서면 `null`로 두지 말고 유저에게 묻는다. damage는 DoT 등 주기 대미지에서만 사용. instant는 사용하지 않는다. |
 | `duration_bullets` | 선택 | buff, weapon_change | `[N발 유지]`인 경우 |
-| `persist_on_revive` | 선택 | buff | `[부활 시 유지]` 블록. 전투불능→부활을 거쳐도 이 버프는 남는다는 표기. 전투불능 때 받은 유한 지속 버프가 사라지는데 이 표기가 붙은 것은 남는다(`bm.knock_down`). 전투불능은 보스 공격 패턴이 있을 때만 생긴다. 블록을 버리면 다음 세션이 누락으로 다시 조사한다 (디젤 : 윈터 스위츠 `인트로`·`클라이막스`) |
+| `persist_on_revive` | 선택 | buff | `[부활 시 유지]` 블록. 전투불능→부활을 거쳐도 이 버프는 남는다는 표기. 전투불능 때 받은 버프는 전부 사라지는데(패시브는 부활 때 다시 붙는다) 이 표기가 붙은 것은 남는다(`bm.knock_down`). 전투불능은 보스 공격 패턴이 있을 때만 생긴다. 블록을 버리면 다음 세션이 누락으로 다시 조사한다 (디젤 : 윈터 스위츠 `인트로`·`클라이막스`) |
 | `skill_damage` | 선택 | weapon_change | 모드 사격이 **스킬 대미지**인 예외에만 `true`. 발수 소모 버프를 먹지 않고 집계도 모드명으로 잡힌다. 기본(미표기)은 일반 공격 — `GAMEPLAY.md` §무기 메카닉. 보유: 나유타 `기억 연소` |
 | `tick_interval` | 선택 | damage, instant | 주기적 발동 간격(초). DoT·주기 자동공격·주기 회복 등에 사용 |
 | `tick_start` | 선택 | damage | 주기 **대미지**의 첫 틱 위상. `"immediate"`(type 1 — 발동과 동시에 첫 틱) 또는 생략(type 2 — 발동 +interval부터, 기본). 회수는 양쪽 같다. 캐릭터별 유형은 `GAMEPLAY.md §효과 실행 순서` 표. 주기 instant(회복·게이지)는 이 필드를 쓰지 않는다 |
@@ -143,6 +143,7 @@ print(json.dumps(data['캐릭터명'], ensure_ascii=False, indent=2))
 | `scaling_ref` | 선택 | damage, instant, buff | `scaling: "stack_count"` 사용 시 기준이 되는 버프/스택/게이지의 `name`. 생략 시 해당 효과 자신의 스택 기준 |
 | `scaling_hp_pct` | 선택 | damage, instant | `scaling: "max_hp_additive"` 사용 시 합산할 최대 체력 비율(%) |
 | `target_effect` | 선택 | buff, instant | 효과가 작용할 대상 효과의 `name`. `effect_interval`·`remove_named_buff` stat에서 필수 |
+| `remove_scope` | 선택 | instant | `remove_named_buff` 전용. `"target"`이면 **`target`으로 풀린 캐릭터에게서만** 그 이름의 버프를 지운다(여럿에게 걸린 인스턴스는 그 캐릭터만 빠진다). 생략하면 종전대로 이름이 같은 버프를 대상·시전자와 무관하게 전부 지운다. 서로 다른 캐릭터가 **같은 이름의 상태를 각자** 들고 있는데 한쪽만 바뀌어야 할 때 쓴다 — 짝끼리 모드를 동기화하는 길티 : 마이티 바니 · 신 : 스위프트 바니 `바니 모드` |
 | `trigger_values` | 선택 | 전체 | timing의 N이 레벨마다 다를 때 사용. `timing`에 `"hit_count:{0}"` 형태로 플레이스홀더 기입, `trigger_values: {"1": 65, "2": 62, ...}`로 레벨별 값 기입. `note` 필드로 상황 설명 추가 |
 | `event_scope` | 선택 | buff | `"recipients"`만 유효. 이 효과가 발생시키는 `event:{name}`을 **실제 수령자에게만** 통지한다(기본은 스쿼드 전체 브로드캐스트). 서로 다른 캐릭터가 같은 이름의 상태를 각자 보유해 남의 상태 변화로 트리거가 잘못 열릴 때 쓴다 (퀸(마코토)·유키코 `1more`·`추격`) |
 | `target_skill` | ✅* | instant | `force_skill_use` 전용 필수 필드. 강제로 발동시킬 **슬롯**(`"스킬1"`/`"스킬2"`/`"스킬3"`). 효과 하나가 아니라 슬롯 전체가 대상이라 `target_effect`를 쓰지 않는다 |
@@ -327,6 +328,8 @@ template에 timing 키워드 없으면:
 | `풀 차지 공격 명중 시` | `"full_charge_hit"` (명중) |
 | `풀 차지 N회 공격 시` / `풀 차지 공격 N회 공격 시` | `"full_charge_fire_count:N"` |
 | `풀 차지 공격 N회 명중 시` | `"full_charge_hit_count:N"` |
+| `풀 차지 공격이 아닌 일반 공격 N회 공격 시` | `"non_full_charge_fire_count:N"` — 논차지(톡톡이) **발사** 카운터. `full_charge_fire_count:N`의 여집합이다 |
+| `풀 차지 상태 N초 이상 유지를 M회 실행 시` | `"charge_hold_count:N:M"` — `charge_hold:N` 판정의 누적 M회. 1회짜리는 `charge_hold:N` |
 | `코어 N회 명중 시` | `"core_hit_count:N"` |
 | `파츠 N회 명중 시` | `"part_hit_count:N"` |
 | `N회 피격 시` | `"received_hit_count:N"` (N 미명시 시 기본값 1, 즉 `"received_hit_count:1"`) |
@@ -351,11 +354,13 @@ template에 timing 키워드 없으면:
 | `분배 대미지 증가 효과 적용 시` | `"event:stat_applied:split_dmg_pct"` |
 | `버스트 N 사용 시` (스쿼드 버스트 단계) | `"squad_burst_cast:N"` |
 | `엄폐물 피격 시` | `"event:cover_hit"` |
+| `엄폐물 체력 회복 시` | `"event:cover_healed"` — 그 니케 **자신의** 엄폐물이 회복될 때. 가득 찬 엄폐물에 들어간 회복도 발동(GAMEPLAY §트리거 발동 의미) |
 | `N명 이상 동시 명중 시` | `"multi_hit:N"` |
 | `코어 명중 시` (횟수 없음) | `"core_hit_count:1"` |
 | `풀 차지 상태를 N초 이상 유지 시` | `"charge_hold:N"` |
 | `마지막 탄환 공격 시` / `마지막 탄환 공격 후` | `"last_bullet_fire"` |
-| `펠릿 N회 명중 시` | `"pellet_hit_count:N"` |
+| `펠릿 N회 명중 시` | `"pellet_hit_count:N"` (누적 카운터) |
+| `일반 공격 1회로 펠릿 N개 이상 명중 시` | `"pellet_hit_in_shot:N"` — **한 발 안의** 명중 펠릿 수 문턱. 누적인 `pellet_hit_count:N`과 다른 축이다 |
 | `최대 장탄 재장전 완료 시` | `"event:full_reload"` |
 | `파괴 가능한 발사체 파괴 시` | `"event:projectile_destroy"` |
 | `적 등장 시` / `랩처 등장 시` | `"event:enemy_spawn"` |
@@ -413,7 +418,7 @@ template에 timing 키워드 없으면:
 | `대상이 [코드] 코드라면` | `"target_code:[코드]"` (예: `"target_code:전격"`) |
 | `[코드] 코드 적이 있다면` / `[코드] 코드 적으로부터` | `"target_code:[코드]"` — 단일 보스 sim이라 "존재 여부"와 "대상의 코드"가 같은 판정이다 |
 | `동일 스쿼드 아군이 있다면` | `"squad_ally_exists"` |
-| `적정 사거리의 대상 명중 시` | `"optimal_range"` — 사거리 항이 따로 없어 **적 스펙 `optimal_range_weapons`**(③ +30%를 태우는 그 목록)에 시전자 무기군이 들어 있는지로 판정한다. 목록을 안 적은 스쿼드에서는 무발동이다 |
+| `적정 사거리의 대상 명중 시` | `"optimal_range"` — ③ +30%를 태우는 판정과 같은 함수(`buff_manager.in_optimal_range`)로 본다. 보스 거리(`enemy.distance`)가 없으면 **적 스펙 `optimal_range_weapons`**에 시전자 무기군이 들어 있는지, 있으면 시전자의 적정 구간에 거리가 드는지다. 둘 다 안 적은 스쿼드에서는 무발동이다 |
 | `방어형 아군이 있다면` / `없다면` | `"has_defender_ally"` / `"no_defender_ally"` — `parsed_nikke["class"]` 기준, 자신 제외. **배타 분기라 양쪽을 같이 적는다** |
 | `코어가 아니라면` | `"not_core"` |
 | `후열에 배치됐을 때` | `"back_row"` |
@@ -423,6 +428,7 @@ template에 timing 키워드 없으면:
 | `아군의 체력이 최대일 때` | `"ally_hp_max"` |
 | `차지 중` | `"during_charge"` |
 | `보호막 지속 중` / `보호막 적용 상태라면` | `"during_shield"` |
+| `자신의 엄폐물이 생존해 있을 때 한하여` | `"self_cover_alive"` — 런타임 재평가 조건. 엄폐물은 보스 공격 패턴이 있을 때만 부서지므로 기본 경로에서는 늘 참이다. `[지속]` 효과면 timing `passive`(슈가 `블랙 타이푼 4`) |
 | `재장전 중` | `"during_reload"` |
 | `포커싱 상태` | `"focusing"` |
 | `직전에 버스트 스킬을 사용한` | `"burst_casted"` |
@@ -522,6 +528,8 @@ template에 timing 키워드 없으면:
 | `자신을 제외한 기본 버스트 단계가 Step3인 페르소나 상태 아군 전체에게` | `"allies_burst3_persona_excl_self"` — 페르소나 상태 = `persona_state` 마커 버프 보유 |
 | `[버프명] 상태인 적 전체에게` | `"enemies_with_buff:버프명"` |
 | `[버프명] 상태인 아군 전체에게` | `"allies_with_buff:버프명"` |
+| `[버프명] 상태가 아닌 아군 전체에게` | `"allies_without_buff:버프명"` — 재부여를 막는 대상 필터. **같은 clause에서 그 상태를 부여하는 항목을 배열 뒤로 민다**(부여가 먼저면 뒤 항목의 대상이 0명이 된다 — Step 7 §담체 규칙의 target판) |
+| `해로운 효과 소지 아군 중 무작위 아군 N기에게` | `"allies_random_with_debuff:N"` — harmful 보유자만 거른 뒤 무작위 N기. **시전자를 제외하지 않는다**(제외하는 `allies_random:N`과 다른 키) |
 | `직전에 버스트 스킬을 사용한 [무기] 아군 전체에게` | `"allies_burst_casted_weapon:MG"` 등 — **무기 조건이 붙으면 target으로 합친다.** `burst_casted` condition은 시전자 기준으로만 평가되므로 대상 필터로 쓸 수 없다 |
 | `직전에 버스트 스킬을 사용한 기본 버스트 단계가 Step 3인 아군 전체에게` | `"allies_burst_casted_burst3"` — 위와 같은 이유로 target으로 합친다. **`allies_burst3` + condition `burst_casted`로 쓰지 않는다** (그러면 "시전자가 버스트를 썼을 때 B3 전원"이 되어 대상이 달라진다) |
 | `파괴 가능한 발사체 전체에게` | `"all_projectiles"` |
@@ -600,7 +608,7 @@ template에 timing 키워드 없으면:
 | `burst_charge_speed_pct` | 버스트 게이지 충전 속도 % ▲ |
 | `optimal_range_max` | 최대 적정 사거리 N 증가 |
 | `optimal_range_max_pct` | 최대 적정 사거리 N% ▲ (`적정 최대 사거리 N% ▲` — 비율 표기. 정액 표기는 `optimal_range_max`) |
-| `optimal_range_min` | 최소 적정 사거리 % ▲ |
+| `optimal_range_min` | 최소 적정 사거리 % ▲ — 최소 거리를 N% **줄여** 구간을 가까이까지 넓힌다(유저 결정 2026-09-18). 버프 키는 `optimal_range_min_pct` |
 | `explosion_range` | 폭발 범위 N 증가 |
 | `pierce_range` | 관통 범위 N 증가 |
 | `pierce_enabled` | 관통 특화 (`values`/`fixed_value` 없음) |
@@ -619,7 +627,7 @@ template에 timing 키워드 없으면:
 | `trigger_count_reduce` | 특정 효과의 발동 횟수 조건 N회 ▼ (`target_effect` 필수, `fixed_value`에 감소량) |
 | `shield_dmg_pct` | 보호막 대미지 % ▲ |
 | `cover_def_pct` | 엄폐물 방어력 % ▲ |
-| `cover_hp_pct` | 엄폐물 최대 체력 % ▲ |
+| `cover_hp_pct` | 엄폐물 최대 체력 % ▲. `시전자의 최대 체력 비례 엄폐물 최대 체력 N% ▲`면 `"scaling": "max_hp"`(티아 `카멜레온 은신술`) |
 | `outgoing_heal_pct` | 주는 체력 회복량 % ▲ |
 | `shield_from_max_hp_pct` | 최대 체력 N%만큼 보호막 생성 |
 | `shared_shield_from_max_hp_pct` | `아군 공용 보호막` — 최대 체력 N%만큼 생성하되 **대상은 시전자 1인**(`target: "self"`). 대상 표기가 없어도 `all_allies`로 읽지 않는다 |
@@ -643,7 +651,8 @@ template에 timing 키워드 없으면:
 | `infinite_ammo` | 장탄수 무한 (`values`/`fixed_value` 없음) |
 | `focus_fire` | 사격 집중 (`values`/`fixed_value` 없음, `duration` 필수) |
 | `enemy_movement_disable` | 적 이동 불가 (`values`/`fixed_value` 없음, `duration` 필수) |
-| `debuff_immune` | 해로운 효과 면역 (`values`/`fixed_value` 없음) |
+| `debuff_immune` | 해로운 효과 면역 (`values`/`fixed_value` 없음) — **개수 표기가 없는** 무제한 면역 |
+| `debuff_immune_count` | `해로운 효과 면역 N개` — 개수 제한 면역. N을 `fixed_value`(레벨별이면 `values`)에 적는다. 개수를 버리고 `debuff_immune`으로 접지 않는다(`debuff_cleanse`의 「해제 N개」와 같은 규약) |
 | `debuff_immune:[name]` | 특정 named debuff 면역. `[name]`에 debuff 이름 기입 (`values`/`fixed_value` 없음). 예: `debuff_immune:소음 공해` |
 | `stun_immune` | 기절 면역 (`values`/`fixed_value` 없음) |
 | `charge_speed_debuff_immune` | 차지 속도 감소 효과 면역 (`values`/`fixed_value` 없음). **스킬 버프에만** 면역 — 오버로드·큐브는 그대로 걸린다 (GAMEPLAY.md §무기 메카닉) |
@@ -704,14 +713,14 @@ template에 timing 키워드 없으면:
 | `debuff_stack_add` | 중첩형 해로운 효과 중첩 N 증가. 스택이 쌓이는 debuff에만 사용 |
 | `debuff_stack_remove` | 중첩형 해로운 효과 중첩 N 감소. 스택이 쌓이는 debuff의 중첩을 줄이는 경우에만 사용. 단순 해제(스택 무관)는 `debuff_cleanse` 사용 |
 | `remove_named_buff` | 특정 이름의 버프 전체 제거 (`target_effect` 필수, `values` 없음) |
-| `debuff_cleanse` | 자신 또는 아군의 해로운 효과 단순 해제 — 스택 수와 무관하게 제거. (`values` 없음). 스택형 debuff의 중첩 감소는 `debuff_stack_remove` 사용 |
-| `enemy_buff_cleanse` | 적의 이로운 효과 해제 (`values` 없음) |
+| `debuff_cleanse` | 자신 또는 아군의 해로운 효과 해제 — 스택 수와 무관하게 **효과 단위로** 제거. **원문 `[해로운 효과 해제 N개]`의 N을 `fixed_value`에 적는다**(2026-09-15 유저 확정. 종전 조항은 `values` 없음이었고 보유자가 0명이라 개수를 버려도 드러나지 않았다). 레벨마다 개수가 다르면 `values`. 제거 우선순위가 원문에 없으므로 **부여가 이른 것부터** 센다. 스택형 debuff의 중첩 감소는 `debuff_stack_remove` 사용 |
+| `enemy_buff_cleanse` | 적의 이로운 효과 해제 N개. `values`에 레벨별 해제 개수(원문 `[이로운 효과 해제 {N}개]`) |
 | `force_reload` | 강제 재장전 (`values` 없음) |
 | `targeting_exclude` | 공격 대상 타겟팅에서 제외 (`values`/`fixed_value` 없음) |
 | `heal_overcharge_discharge` | 저장된 회복량을 방출하여 대상에게 회복 (`target_effect` 필수, `values` 없음) |
 | `current_hp_reduce` | 현재 체력 N% 감소 |
-| `cover_heal_pct` | 엄폐물 체력 회복 (시전자 기준 N%) |
-| `burst_reentry` | 버스트 재진입 (`values`/`fixed_value` 없음) |
+| `cover_heal_pct` | 엄폐물 체력 회복 N% — 기본은 엄폐물 최대 체력 기준, `"scaling": "max_hp"`면 시전자 최종 최대 체력 기준(§7-10) |
+| `burst_reentry` | `[버스트 재진입 N단계]` — 이번 버스트 1회의 재진입. **`fixed_value`에 단계 N**을 적는다(`values` 없음). `[… 재진입 N단계로 변경] [지속]` 상태 문형은 buff `burst_stage_override:reenterN`이다(아니스 : 스타) |
 | `force_move` | 공격 범위 중심 강제 이동 (복잡 메카닉, 파싱 불가 시 `_unparseable`) |
 | `revive` | 부활. `[체력 N%로 부활]`의 N을 `values`에 적는다(부활 직후 체력 %). 값이 없으면 시뮬이 즉시 실패한다 — 마나 `매터 감마 3` |
 | `gauge_charge` | 게이지 N 충전 (`gauge_id` 필수) |
@@ -866,7 +875,17 @@ duration이 원문에 없으면 §2 `duration` 행대로 처리한다 — `null`
 
 `시전자의 최종 최대 체력 비례 N%` 형태:
 - 버프 → stat: `atk_from_hp_pct` 등 별도 stat 사용
+- 최대 체력 증가(`시전자의 최종 최대 체력 비례 최대 체력 N% ▲`) → stat: `max_hp_from_max_hp_pct`.
+  **`시전자 기준 최대 체력 N% ▲`(`hp_caster_based_pct`)와 다른 키다** — 그쪽은 시전자의
+  *버프 제외* 기본 체력 기준이고(§값 산정), 이쪽은 시전자에게 걸린 버프까지 포함한 최종 최대 체력이다.
+  `최대 체력만`이면 현재 체력을 유지하는 판본이 따로 필요하다(`max_hp_pct` ↔ `max_hp_only_pct`와 같은 쌍)
 - 대미지 → stat: `damage`, `"scaling": "max_hp"` 추가
+- 회복(`시전자의 최종 최대 체력 비례 N% 회복` · `시전자 최대 체력 비례 N% 회복`) → stat: `heal_hp_pct`,
+  **`"scaling": "max_hp"` 추가**. 이게 없으면 회복량 기준이 *받는 사람*의 기본 체력이 된다
+  (`timeline.handle_heal_hp_pct`). 기준 표기가 아예 없는 `[체력 회복 N%]`에는 붙이지 않는다.
+  2026-09-15에 로스터 전수를 이 규칙으로 통일했다 — 그 전에는 같은 문형이 12건 부착 /
+  20건 미부착으로 갈려 있었다
+- 엄폐물 회복(`시전자의 최종 최대 체력 비례 엄폐물 체력 회복 N%`) → stat: `cover_heal_pct`, `"scaling": "max_hp"` 추가. 기준 표기 없는 `[엄폐물 체력 회복 N%]`에는 붙이지 않는다 — 그쪽은 엄폐물 최대 체력 기준이다(슈가 `블랙 타이푼 3` ↔ 나가 `우정의 가드`)
 
 ```json
 { "type": "damage", "stat": "damage", "scaling": "max_hp", "values": {...} }
