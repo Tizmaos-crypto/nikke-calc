@@ -1976,6 +1976,14 @@ class BuffManager:
                     acc[key] -= 1.0
                 elif random.random() >= p:
                     return False
+            elif cond in ("target_is_boss", "target_is_add"):
+                # 「대상이 타겟이라면」·「대상이 타겟이 아닌 랩쳐라면」 — 트리거를 낸 한 발의 대상은 시전자가
+                # 겨눈 적이다(boss_pattern.py §조준). 쫄몹이 없으면 늘 보스(타겟)라 앞은 참, 뒤는 거짓이다.
+                # 발동 시점 게이트 — `_RUNTIME_COND_PREFIXES`에 넣지 않는다(리버렐리오 `격류`는 [지속]이고
+                # 반대 분기의 해제 항목이 끈다)
+                on_add = self._resolve_enemies("target", caster)[0] != "__enemy__"
+                if on_add != (cond == "target_is_add"):
+                    return False
             elif cond == "target_stunned":
                 # 기절은 이름 있는 상태가 아니므로 target_state:로 잡지 않는다.
                 # 누가 걸었든 stat이 stun이면 참 (프리바티 `LD 어설트 3` 기본 판본)
@@ -4297,10 +4305,10 @@ class BuffManager:
             return [n for n in self.squad_names if not self.state.get("burst_casted", {}).get(n)]
         if target == "all_allies_excl_self":
             return [n for n in self.squad_names if n != caster]
-        if target in ("enemy", "all_enemies", "target", "target_body", "same_target",
+        if target in ("enemy", "all_enemies", "target", "target_body", "same_target", "boss",
                       "enemies_in_range", "enemies_nearest_in_range"):
             # 적 대상: "__enemy__" 센티널 사용 (타임라인이 판단). 쫄몹이 살아 있으면 적마다 푼다
-            return self._resolve_enemies(target)
+            return self._resolve_enemies(target, caster)
 
         # "자신을 제외한 전투불능 상태 최종 공격력이 가장 높은 아군 N기" (마나 `매터 감마 3` 부활)
         if target.startswith("allies_down_top_atk_excl:"):
@@ -4467,16 +4475,16 @@ class BuffManager:
         # `same_target:[이름]`도 같은 적을 가리킨다 — 접두사까지 봐야 []로 새지 않는다.
         if (target.startswith("enemies") or target.startswith("same_target:")
                 or target in ("target", "target_body", "same_target")):
-            return self._resolve_enemies(target)
+            return self._resolve_enemies(target, caster)
 
         # 커버, 발사체 등
         return []
 
-    def _resolve_enemies(self, target: str) -> list[str]:
+    def _resolve_enemies(self, target: str, caster: str = "") -> list[str]:
         """적 대상 문자열 → 적 id 목록. 쫄몹이 없으면 늘 `["__enemy__"]`(단일 보스 센티널)이고, 살아 있으면
-        보스 패턴이 규칙대로 고른다(정본: boss_pattern.py §쫄몹)."""
+        보스 패턴이 규칙대로 고른다 — 조준 규칙은 시전자가 겨눈 적이다(정본: boss_pattern.py §쫄몹·§조준)."""
         if self.enemy_resolver is not None:
-            got = self.enemy_resolver(target)
+            got = self.enemy_resolver(target, caster)
             if got is not None:
                 return got
         return ["__enemy__"]
