@@ -179,6 +179,7 @@ _BUFFS_ZERO: dict[str, Any] = {
     "atk_dmg_pct":                  0.0,
     "burst_dmg_pct":                0.0,
     "burst_dmg_aoe_pct":            0.0,   # 대상이 '적 전체'인 버스트 대미지에만 가산
+    "burst_dmg_single_pct":         0.0,   # 대상 설명이 '~ 적 1기에게'인 버스트 대미지에만 가산
     "pierce_dmg_pct":               0.0,
     "dot_dmg_pct":                  0.0,
     "armor_break_dmg_pct":          0.0,
@@ -202,6 +203,8 @@ _BUFFS_ZERO: dict[str, Any] = {
     "is_element_match": False,
     "def_pct":          0.0,
     "enemy_def_down_pct": 0.0,  # 적 방어력 감소(②). 적 대상 def_pct 버프 합(음수)
+    "enemy_def_down_flat": 0.0,  # 적 방어력 **정액** 감소(②). 적 대상 def_caster_based_pct를
+                                 # 시전자 기본 방어력 × N%로 환산한 합(음수). 비율판과 더하는 자리가 다르다
     "charge_speed_pct": 0.0,
     "charge_time_flat": 0.0,  # 차지 시간 절대 가감(초). 감소는 음수
     "charge_time_fixed": False,
@@ -253,6 +256,7 @@ _STAT_TO_BUFF: dict[str, str] = {
     "atk_dmg_pct":                  "atk_dmg_pct",
     "burst_dmg_pct":                "burst_dmg_pct",
     "burst_dmg_aoe_pct":            "burst_dmg_aoe_pct",
+    "burst_dmg_single_pct":         "burst_dmg_single_pct",
     "pierce_dmg_pct":               "pierce_dmg_pct",
     "dot_dmg_pct":                  "dot_dmg_pct",
     "armor_break_dmg_pct":          "armor_break_dmg_pct",
@@ -319,6 +323,8 @@ _DIRECT_READ_STATS = frozenset([
     "heal_received_pct",     # heal_received_mult()
     "next_shield_hp_pct",    # take_next_shield_amp()
     "invincible", "undying", "stealth", "cover_disabled",   # has_live_stat()
+    "shield_invincible",     # has_live_stat() — absorb_shield()가 보호막의 시전자를 본다
+    "received_dmg_split_even",   # split_group() — 보스 공격 한 발을 집단이 나눠 진다
 ])
 
 # 크리확률로 합산되는 stat 집합 (백분율 → 확률 환산 후 기본 15%와 합연산)
@@ -419,6 +425,11 @@ _BUFF_AUDIT = os.environ.get("NIKKE_BUFF_AUDIT") == "1"
 # event:shield_applied)은 동일하게 성립한다 — 대상 수는 target 값이 결정한다. (블랑)
 _SHIELD_STATS = frozenset(["shield_from_max_hp_pct", "shared_shield_from_max_hp_pct"])
 
+# 분신(디코이)을 만드는 stat 집합. 보호막과 같은 모양으로 대상별 체력을 들고 다니지만
+# **층이 바깥**이다 — 분신은 니케 몸에 붙은 막이 아니라 별개 개체라 보호막·엄폐물보다 먼저 맞는다.
+# (`timeline._land_squad` §층 규칙 · `docs/scenarios/라이.md` §해석 선언)
+_DECOY_STATS = frozenset(["decoy"])
+
 # get_buffs 시점에 재평가가 필요한 runtime condition 접두사 집합
 # 이 집합에 포함된 조건이 하나라도 있으면 ActiveBuff.has_runtime_conditions = True
 _RUNTIME_COND_PREFIXES = frozenset([
@@ -434,9 +445,18 @@ _RUNTIME_COND_PREFIXES = frozenset([
     # 이후 게이팅을 전적으로 이 목록에 의존한다 — 빠지면 "적 N기 이상" 버프가
     # 보스전에서 그대로 적용된다 (맥스웰 `일렉트릭 샷` 크리 확률·크리 대미지).
     "enemy_count_above:", "enemy_count_below:",
+    # 적 코드 조건 — 위 「적 수」와 같은 이유다(유저 결정 2026-09-22). 적 코드는 전투 중
+    # 변하지 않으므로 기존 보유자 12명(전부 유한 지속이거나 이산 timing)의 값은 바뀌지
+    # 않지만, **무한 지속 `passive`는 이 목록에만 게이팅을 의존**하므로 빠져 있으면 코드
+    # 조건이 통째로 무시된다 — 레이블 `연애의 달콤함(상상) 4`가 풍압 보스에게도 전격 한정
+    # 피해 감소를 그대로 받고 있었다(같은 캐릭터의 `battle_start` 판본은 정상이라 한
+    # 캐릭터 안에서 두 판정이 갈렸다). 맥스웰 `일렉트릭 샷`과 같은 계통.
+    "target_code:",
     # 엄폐물은 보스 공격 패턴이 있을 때만 부서진다 — 패턴이 없으면 늘 참이다
     # (슈가 `블랙 타이푼 4` 「자신의 엄폐물이 생존해 있을 때 한하여」).
-    "self_cover_alive",
+    # 부정판(「자신의 엄폐물이 파괴된 상태라면」, 베이)도 같은 이유로 여기 있어야 한다 —
+    # 부서지는 프레임에 켜지고 되살아나는(`cover_revive`) 프레임에 꺼져야 한다.
+    "self_cover_alive", "not_self_cover_alive",
     # 「자신이 포커싱 상태일 때」 — 카메라를 잡고 있다(`state["camera"]`). 카메라는 조율이 프레임마다 옮긴다
     # (리틀 머메이드 `버블 오더` → 아군 전체 [사격 집중]).
     "focusing",
@@ -584,6 +604,28 @@ class ActiveBuff:
     shield_per_target: dict[str, float] = field(default_factory=dict)
                                       # shield_from_max_hp_pct의 대상별 보호막량.
                                       # 수명은 ActiveBuff와 같아 별도 만료 상태를 두지 않는다.
+    shield_max_per_target: dict[str, float] = field(default_factory=dict)
+                                      # 부여 시점의 보호막량 스냅샷. `shield_heal_pct`가
+                                      # 되돌릴 수 있는 상한이다 — 회복은 「깎인 만큼」이지
+                                      # 「더 크게」가 아니다. `shield_per_target`과 같은
+                                      # 자리에서 함께 갱신되므로 재발동하면 상한도 새 값이다.
+    decoy_per_target: dict[str, float] = field(default_factory=dict)
+                                      # `decoy`(분신)의 대상별 남은 체력. 보호막과 같은 모양이고
+                                      # 층만 바깥이다 — 분신은 니케 몸 밖의 별개 개체다.
+    decoy_max_per_target: dict[str, float] = field(default_factory=dict)
+                                      # 부여 시점의 분신 체력 스냅샷. `decoy_heal_pct`가
+                                      # 되돌릴 수 있는 상한이다(`shield_max_per_target`과 같은 자리).
+    accum: float = 0.0                # 「누적 → 폭발」 누적기가 지금까지 모은 대미지.
+                                      # `dmg_accum_dealt_atk_pct`(시전자가 가하는 딜) ·
+                                      # `dmg_accum_received_atk_pct`(대상이 받는 딜) 전용.
+    accum_cap: float = 0.0            # 누적 상한 = 시전자 최종 공격력 × values%.
+                                      # **부여 시점 스냅샷이다**(유저 결정 2026-09-22) —
+                                      # 매 프레임 재평가하면 버스트의 공격력 ▲가 상한을
+                                      # 누적 가속과 같은 배율로 밀어 올려 트로니
+                                      # `누적 폭발 스킬`이 영구 무발동이 된다
+                                      # (`docs/scenarios/트로니.md` §실측).
+    accum_done: bool = False          # 상한에 닿았거나 이미 방출했다 — 더 누적하지 않는다.
+                                      # 방출 대미지 자신이 다시 누적되는 재귀를 막는 자리이기도 하다.
     hp_bonus_flat: float = 0.0        # max_hp_from_max_hp_pct가 부여 시점에 확정한 최대 체력
                                       # 가산분(절대값). 「시전자의 **최종** 최대 체력 비례」라
                                       # 조회 시점에 다시 재면 시전자 자신이 대상일 때
@@ -638,6 +680,12 @@ class BuffManager:
 
         # tick_interval damage 효과별 타이머: id(effect) → (caster, next_t, expires_at)
         self._dot_timers: dict[int, tuple[str, float, float]] = {}
+
+        # 「누적 → 폭발」 누적기의 마지막 누적량: 상태 이름 → 값.
+        # 방출(`accum_split_damage`)이 `event:state_end:`에 걸리는 형태(도로시 `낙인`)에서는
+        # 방출 시점에 담체 ActiveBuff가 이미 `_active`에서 빠져 있어 그쪽을 읽을 수 없다 —
+        # 누적할 때마다 여기에도 남겨 두고, 방출은 활성 담체가 없으면 이 값을 쓴다.
+        self._accum_last: dict[str, float] = {}
 
         # `same_target:[이름]` DoT의 중첩 램프 예약: [(fire_t, effect, caster, stack)]
         # 짝 공격이 한 발씩 중첩을 얹는 구조라 **시간에 펼쳐야** 한다 — 한 시점에
@@ -1542,6 +1590,8 @@ class BuffManager:
             hit_crit (bool): 트리거를 발생시킨 히트의 크리 여부 (`trigger_hit_crit` 조건용)
             core_frac (float): 트리거를 발생시킨 탄의 코어 확률 (`not_core` 조건용)
             stack_value (int): 넘은 배수 경계 (`every_stack:이름:N` timing용)
+            heal_source (str): 회복을 **건** 캐릭터 (`event:heal_received` 전용,
+                `not_self_caused_heal` 조건용). 받는 쪽은 `caster` 인자다
 
         ctx는 `_notify_ctx`에 실어 `_condition_ok`가 읽는다. 발동 중 다시 notify가
         걸리는 경로가 있으므로(damage 핸들러 → named damage 명중 → notify) 반드시
@@ -1926,6 +1976,15 @@ class BuffManager:
             elif cond == "not_during_full_burst":
                 if self.state.get("full_burst"):
                     return False
+            elif cond == "not_self_caused_heal":
+                # 「자신이 사용한 회복 효과가 아니라면」 — `event:heal_received`와 짝으로만 쓴다.
+                # 회복 핸들러가 ctx에 실어 준 `heal_source`(회복을 **건** 쪽)가 이 효과의 주인과
+                # 같으면 막는다. 이 조건이 없으면 자기 회복이 자기 트리거를 켜므로
+                # 「자기 지속 회복 → 자기 스택 누적」 순환이 성립한다 (백학 `서약 위반 증거`).
+                # ctx에 `heal_source`가 없는 경로는 출처를 알 수 없으므로 종전대로 통과시킨다.
+                src = self._notify_ctx.get("heal_source")
+                if src is not None and src == caster:
+                    return False
             elif cond == "trigger_hit_crit":
                 # 트리거를 발생시킨 그 히트가 크리티컬이었는가 — notify의 ctx로 전달된다.
                 # 확률 근사가 아니라 실제 롤 결과를 읽는다 (율리아 `마르카토 2`).
@@ -1989,6 +2048,11 @@ class BuffManager:
                 # 누가 걸었든 stat이 stun이면 참 (프리바티 `LD 어설트 3` 기본 판본)
                 if not self.is_stunned("__enemy__"):
                     return False
+            elif cond == "self_stun_immune":
+                # 「자신이 기절 면역 상태라면」 — 위와 같은 규약으로 **버프 이름이 아니라 stat**을 본다.
+                # 남이 건 기절 면역도 참이어야 하므로 self_state:를 쓰지 않는다 (D `처단 3`).
+                if not self._has_immune(caster, "stun_immune"):
+                    return False
             elif cond.startswith("self_hp_above:"):
                 n = float(cond.split(":")[1])
                 hp_pct = self.state.get("hp_pct", {}).get(caster, 100.0)
@@ -2008,6 +2072,11 @@ class BuffManager:
                     return False
             elif cond == "self_cover_alive":
                 if not self.cover_alive(caster):
+                    return False
+            elif cond == "not_self_cover_alive":
+                # 「자신의 엄폐물이 파괴된 상태라면」 — 위의 부정. 엄폐물은 보스 공격
+                # 패턴에만 부서지므로 기본 경로에서는 늘 거짓이다 (베이 애장품 2·3단계).
+                if self.cover_alive(caster):
                     return False
             elif cond.startswith("ally_hp_below:"):
                 # 발동 시점에는 target이 아직 resolve되기 전이라 개별 대상을 볼 수 없다.
@@ -2372,6 +2441,106 @@ class BuffManager:
                 bonus_flat += ab.hp_bonus_flat
         return base_hp * (1.0 + bonus_pct / 100.0) + bonus_flat
 
+    # ── 「누적 → 폭발」 누적기 ────────────────────────────────────────────
+    #
+    # 두 캐릭터가 같은 메커니즘을 반대 방향으로 쓴다:
+    #   · 트로니 `누적 폭발 스킬` — **시전자가 가하는** 딜을 모으고, 상한에 닿는 순간
+    #     `event:accum_full:[이름]`으로 방출한다. 그래서 방출 1회가 늘 상한값이다.
+    #   · 도로시 `낙인`     — **대상이 받는** 딜(스쿼드 전체분)을 모으고, 상한은 절삭만
+    #     하며 **만료**(`event:state_end:[이름]`)로 방출한다.
+    # 상한은 부여 시점 스냅샷이고(ActiveBuff.accum_cap), 누적·방출 모두 방어력이 적용된
+    # **실피해** 단위다 — 방출은 DealForm을 다시 타지 않는다(유저 결정 2026-09-22).
+
+    _ACCUM_STATS = ("dmg_accum_dealt_atk_pct", "dmg_accum_received_atk_pct")
+
+    def final_atk(self, name: str, t: float) -> float:
+        """name의 **최종 공격력** = 기본 공격력 × (1 + atk_pct%) + atk_flat.
+
+        `damage._factor2()`의 공격 항과 같은 식이다 — 누적 상한이 「시전자 최종 공격력의
+        N%」라 같은 자로 재야 한다. 「시전자 기준」(`atk_caster_based_pct`)과 달리
+        **버프를 포함한** 값이다(`GAMEPLAY.md` §값 산정).
+        """
+        base_atk = self.state.get("base_stats", {}).get(name, {}).get("atk", 0.0)
+        b = self.get_buffs(name, "__enemy__", t)
+        return base_atk * (1.0 + b.get("atk_pct", 0.0) / 100.0) + b.get("atk_flat", 0.0)
+
+    def _accum_rate(self, ab: "ActiveBuff") -> float:
+        """이 누적기의 실효 누적 비율(%).
+
+        기준 비율은 `target_effect` 없는 `dmg_accum_rate_pct`(트로니 `누적 폭발 스킬 2` 50%)이고,
+        같은 시전자에게 걸린 `target_effect == 담체 이름`짜리가 **가산**된다
+        (트로니 `메가 T.Rony 2` +62.83%p — 원문에 「배율」이 없으므로 곱하지 않는다).
+        기준 항목이 아예 없으면 100%다 — 도로시 `낙인`의 「**일괄** 누적」이 그 경우로,
+        원문에 비율 블록이 따로 없다.
+        """
+        name = ab.effect.get("name", "")
+        base = None
+        add = 0.0
+        for other in self._by_stat("dmg_accum_rate_pct"):
+            if other.caster != ab.caster:
+                continue
+            ref = other.effect.get("target_effect")
+            val = self._get_value(other.effect, other, other.caster)
+            if val is None:
+                continue
+            if ref is None:
+                base = (base or 0.0) + val
+            elif ref == name:
+                add += val
+        return (100.0 if base is None else base) + add
+
+    def accumulate_damage(self, caster: str, damage: float, t: float) -> None:
+        """보스에게 들어간 히트 하나를 살아 있는 누적기들에 반영한다.
+
+        `timeline._land_boss()`가 딜을 총합에 더한 **직후** 부른다 — 쫄몹 몫은 보스가 받은
+        딜이 아니라서 그쪽 경로에는 붙이지 않는다.
+        """
+        if damage <= 0.0:
+            return
+        # 보유자가 없는 스쿼드에서 히트마다 `_active`를 훑지 않도록 stat 색인을 쓴다
+        # (`_by_stat`은 캐시되고 없으면 빈 리스트다)
+        live = (self._by_stat("dmg_accum_dealt_atk_pct")
+                + self._by_stat("dmg_accum_received_atk_pct"))
+        if not live:
+            return
+        full: list[tuple[str, str]] = []
+        for ab in live:
+            stat = ab.effect.get("stat", "")
+            if ab.accum_done or ab.accum_cap <= 0.0:
+                continue
+            if stat == "dmg_accum_dealt_atk_pct" and ab.caster != caster:
+                continue    # 「시전자가 가하는」 — 남의 딜은 안 센다
+            ab.accum = min(ab.accum + damage * self._accum_rate(ab) / 100.0, ab.accum_cap)
+            name = ab.effect.get("name", "")
+            if name:
+                self._accum_last[name] = ab.accum
+            if ab.accum >= ab.accum_cap - 1e-9:
+                ab.accum_done = True      # 상한 도달 — 더 모으지 않는다
+                if name:
+                    full.append((name, ab.caster))
+        # notify가 방출·해제를 부르며 `_active`를 건드리므로 순회를 끝낸 뒤에 쏜다
+        for name, ab_caster in full:
+            self.notify(f"event:accum_full:{name}", t, ab_caster)
+
+    def accum_discharge(self, name: str, t: float) -> float:
+        """`name` 누적기가 모은 양을 방출한다 — 값을 반환하고 누적기를 비운다.
+
+        담체가 아직 살아 있으면(트로니 — 상한 도달 방출) 그 자리에서 비우고 `accum_done`을
+        세워 **방출 대미지 자신이 다시 누적되는 재귀**를 막는다. 담체가 이미 사라졌으면
+        (도로시 — 만료 방출) `_accum_last`에 남겨 둔 마지막 값을 쓴다.
+        """
+        val = 0.0
+        for ab in self._active:
+            if ab.effect.get("name") == name and ab.effect.get("stat", "") in self._ACCUM_STATS:
+                val = ab.accum
+                ab.accum = 0.0
+                ab.accum_done = True
+                break
+        else:
+            val = self._accum_last.get(name, 0.0)
+        self._accum_last[name] = 0.0
+        return val
+
     def shield_amount(self, name: str) -> float:
         """name에게 현재 적용 중인 보호막 총량.
 
@@ -2380,6 +2549,19 @@ class BuffManager:
         """
         return sum(
             ab.shield_per_target.get(name, 0.0)
+            for ab in self._active
+            if ab.effect.get("stat") in _SHIELD_STATS
+        )
+
+    def shield_capacity(self, name: str) -> float:
+        """name의 보호막 **최대치** 총합 — 부여 시점 값(`shield_max_per_target`)의 합.
+
+        `shield_amount()`가 지금 남은 양이라면 이쪽은 되돌릴 수 있는 상한이다.
+        기준 표기가 없는 `[보호막 체력 회복 N%]`의 분모로 쓴다(지금 로스터에 보유자는 없다 —
+        셋 다 「시전자의 최종 최대 체력 비례」다).
+        """
+        return sum(
+            ab.shield_max_per_target.get(name, 0.0)
             for ab in self._active
             if ab.effect.get("stat") in _SHIELD_STATS
         )
@@ -2419,6 +2601,26 @@ class BuffManager:
 
     def has_live_stat(self, name: str, stat: str, t: float) -> bool:
         return any(self._live(ab, name, t) for ab in self._by_stat(stat))
+
+    def split_group(self, name: str, t: float) -> list[str]:
+        """`받는 대미지 균등 분배` — name과 한 발을 나눠 지는 산 니케 목록(자신 포함).
+
+        분배가 안 걸렸거나 혼자 남았으면 **빈 목록**이다 — 호출부가 기존 단일 경로를 그대로 탄다.
+        분배가 둘 이상 겹치면 합집합이다(⬜ 인게임 미확인 — 지금 로스터엔 겹칠 조합이 없다).
+        전투불능인 멤버는 빠진다: 쓰러진 니케는 피해를 안 받는다.
+        `_live()`가 지연 resolve까지 확정하므로 `["self", "allies_lowest_hp_excl:2"]` 같은
+        복합 대상도 여기서 풀린다(블랑 `쇼타임 2`와 같은 경로).
+        """
+        if self.is_down(name):
+            return []
+        out: list[str] = [name]
+        for ab in self._by_stat("received_dmg_split_even"):
+            if not self._live(ab, name, t):
+                continue
+            for c in (ab.target_chars or []):
+                if c not in out and not self.is_down(c) and self._live(ab, c, t):
+                    out.append(c)
+        return out if len(out) > 1 else []
 
     def taunters(self, t: float) -> list[str]:
         """지금 도발 중인 산 니케(스쿼드 순서). 자기에게 건 `taunt`와, 적에게 걸어 자신을
@@ -2544,6 +2746,15 @@ class BuffManager:
         self.state["cover_hp"][name] = 0.0
         self._invalidate_buffs_cache()
 
+    def revive_cover(self, name: str, hp: float) -> None:
+        """부서진 name의 엄폐물을 체력 `hp`로 되살린다 — `break_cover`의 역이다.
+
+        `cover_revive` stat 전용이고, **회복(`cover_heal_pct`)은 이 경로를 쓰지 않는다**
+        (회복은 부서진 엄폐물을 되살리지 않는다는 규약이 그대로다). 같은 이유로
+        `self_cover_alive`·`not_self_cover_alive` 판정이 뒤집히므로 캐시를 비운다."""
+        self.state["cover_hp"][name] = max(0.0, hp)
+        self._invalidate_buffs_cache()
+
     def cover_max_hp(self, name: str, t: float) -> float:
         """name의 엄폐물 최대 체력 — 기본값(`state["cover_base_hp"]`, 임의값) 위에 `cover_hp_pct`를 얹는다.
 
@@ -2614,8 +2825,18 @@ class BuffManager:
         # 나중에 생긴 것부터 — 같은 시각이면 목록 뒤(나중에 붙은) 쪽. 재발동은 activated_at이 갱신된다
         order = sorted(range(len(live)), key=lambda i: (live[i].activated_at, i), reverse=True)
         total = 0.0
+        ended: list[ActiveBuff] = []
         for i in (order if pierce else order[:1]):
             ab = live[i]
+            # 「자신이 설치한 보호막 무적」(`shield_invincible`) — **그 보호막을 만든
+            # 시전자**가 무적을 들고 있으면 막아 내되 잔량이 줄지 않는다. 대상이 아니라
+            # 시전자로 가르므로 남이 걸어 준 보호막은 그대로 깎인다. 판정을 흡수 시점에
+            # 두었기 때문에 같은 프레임에 무적과 보호막이 함께 걸릴 때의 **항목 순서와
+            # 무관**하다. `invincible`이 체력 피해만 0으로 하는 것의 짝이다 — 층이 다를 뿐
+            # 「그 층에서 피해가 멈춘다」는 같다. (레이블 `망상 공유`)
+            if self.has_live_stat(ab.caster, "shield_invincible", t):
+                total += dmg
+                continue
             left = ab.shield_per_target[name]
             taken = min(left, dmg)
             ab.shield_per_target[name] = left - taken
@@ -2624,7 +2845,163 @@ class BuffManager:
                 ab.shield_per_target[name] = 0.0
                 # `during_shield` 판정이 바뀌므로 집계 캐시를 비운다
                 self._invalidate_buffs_cache()
+                if ab.effect.get("end_on_shield_consumed") and not any(
+                    v > 0.0 for v in ab.shield_per_target.values()
+                ):
+                    ended.append(ab)
                 self.notify("event:shield_consumed", t, name)
+        for ab in ended:
+            self._end_shield_carrier(ab, t)
+        return total
+
+    def decoy_capacity(self, name: str) -> float:
+        """name이 가진 분신의 **최대치** 총합 — 부여 시점 값(`decoy_max_per_target`)의 합."""
+        return sum(
+            ab.decoy_max_per_target.get(name, 0.0)
+            for ab in self._active
+            if ab.effect.get("stat") in _DECOY_STATS
+        )
+
+    def has_decoy(self, name: str) -> bool:
+        """name이 살아 있는 분신을 가지고 있는지."""
+        return any(
+            ab.decoy_per_target.get(name, 0.0) > 0.0
+            for ab in self._active
+            if ab.effect.get("stat") in _DECOY_STATS
+        )
+
+    def absorb_decoy(self, name: str, dmg: float, t: float) -> float:
+        """분신이 이 피해를 받는다. 받은 양을 돌려준다(0이면 분신 없음).
+
+        **보호막·엄폐물보다 안쪽, 체력 바로 앞 층이다**(유저 2026-09-21 — 신데렐라 계열의
+        인게임 거동). 호출은 `timeline._land_squad`가 하며, **엄폐 중이 아닐 때만** 부른다:
+        엄폐물이 *엄폐 중에* 대신 맞는 것의 짝으로 분신은 니케가 나와서 *사격 중일 때*
+        대신 맞는다. 그래서 엄폐물과 분신은 사실상 배타다.
+
+        보호막과 같이 **나중에 생긴 것 하나만** 맞고 남은 피해는 넘어가지 않는다.
+        관통(`pierce`)은 가르지 않는다 — 관통은 막을 뚫는 성질이고 분신은 다른 개체다.
+
+        체력이 0이 되면 분신은 **사라진다**(담체 버프를 끝낸다). 보호막의
+        `end_on_shield_consumed`처럼 옵트인이 아니라 기본 동작이다 — 부서진 분신이 `_active`에
+        남으면 `self_state:디코이`가 계속 참이라 그 상태를 읽는 효과(신데렐라 `아름다움`,
+        라이의 디코이 회복 둘)가 없는 분신을 계속 회복·참조한다.
+
+        ⬜ **인게임 미확인 둘**(`docs/DATA_VERIFY.md` §보스 → 니케 피해):
+        ① 「사격 중일 때 대신 맞는다」는 유저의 기억이고 확정이 아니다.
+        ② 적이 분신을 실제로 *조준*하는지(= 도발처럼 공격 대상 자체가 바뀌는지), 아니면
+           주인이 맞은 피해를 분신이 대신 받는지. 여기서는 후자(흡수 층)로 모델링한다 —
+           조준을 바꾸려면 `_attack_targets` 전체를 건드려야 하고, 분신은 공격 대상 목록에
+           없는 개체라 「누가 몇 발을 맞는가」가 통째로 달라진다.
+        **보스 공격 패턴이 없는 기본 경로에서는 어느 쪽이든 딜 기여가 0이다.**
+        """
+        live = [ab for ab in self._active
+                if ab.effect.get("stat") in _DECOY_STATS
+                and ab.decoy_per_target.get(name, 0.0) > 0.0 and t < ab.expires_at]
+        if not live:
+            return 0.0
+        ab = max(live, key=lambda x: (x.activated_at, x.uid))
+        taken = min(ab.decoy_per_target[name], dmg)
+        ab.decoy_per_target[name] = ab.decoy_per_target[name] - taken
+        if ab.decoy_per_target[name] <= 0.0:
+            ab.decoy_per_target[name] = 0.0
+            self._invalidate_buffs_cache()
+            if not any(v > 0.0 for v in ab.decoy_per_target.values()):
+                self._end_shield_carrier(ab, t)
+        return taken
+
+    def heal_decoy(self, name: str, amount: float, t: float) -> float:
+        """name의 분신을 amount만큼 되돌린다 — 실제로 되돌린 양을 반환한다.
+
+        **깎인 만큼만 채운다.** 상한은 부여 시점 값(`decoy_max_per_target`)이고, 없는 분신을
+        새로 만들지는 않는다 — `heal_shield`·`cover_heal_pct`와 같은 규약이다(생성은 `decoy`).
+        부서진 분신은 담체가 이미 끝나 `_active`에 없으므로 후보에서 빠진다.
+        """
+        if amount <= 0.0:
+            return 0.0
+        live = [ab for ab in self._active
+                if ab.effect.get("stat") in _DECOY_STATS
+                and name in ab.decoy_max_per_target and t < ab.expires_at]
+        if not live:
+            return 0.0
+        live.sort(key=lambda ab: ab.activated_at, reverse=True)
+        left, total = amount, 0.0
+        for ab in live:
+            room = ab.decoy_max_per_target[name] - ab.decoy_per_target.get(name, 0.0)
+            if room <= 0.0:
+                continue
+            put = min(room, left)
+            ab.decoy_per_target[name] = ab.decoy_per_target.get(name, 0.0) + put
+            total += put
+            left -= put
+            if left <= 0.0:
+                break
+        if total > 0.0:
+            self._invalidate_buffs_cache()
+        return total
+
+    def _end_shield_carrier(self, ab: "ActiveBuff", t: float) -> None:
+        """다 깎인 보호막의 담체 버프를 끝낸다 — `end_on_shield_consumed` 전용.
+
+        **부서진 분신(`absorb_decoy`)도 같은 자리를 쓴다.** 그쪽은 옵트인이 아니라 기본
+        동작이다 — 분신은 막이 아니라 개체라 체력이 0이면 그냥 없어진다.
+
+        보호막이 곧 상태인 버프는 보호막이 없어지면 상태도 없어져야 한다. 그러지 않으면
+        `shield_per_target`만 0이 되고 `_active`에는 남아 **`self_state:[이름]`이 계속 참**이라
+        「보호막이 없을 때」 분기가 어느 모드에서도 열리지 않는다(킬로 `나노 코팅` — 스킬
+        셋 중 절반이 그 분기에 있다). `during_shield`는 `has_shield()`가 잔량을 보므로 이미
+        정상적으로 꺼진다 — 어긋나 있던 것은 이름 상태 쪽뿐이다.
+
+        **효과 단위 옵트인이다.** ⬜ 인게임에서는 모든 보호막이 이럴 가능성이 높지만 확인된
+        것만 켠다 — 일괄로 켜면 이름이 상태로 참조되는 다른 보호막의 발동 시점이 앞당겨진다
+        (폴리 `폴리스 뱃지` → `event:state_end:폴리스 뱃지` → `도그 테라피 3` 지속 회복).
+        제거 절차는 `remove_named_buff`와 같은 자리를 쓴다.
+        """
+        name = ab.effect.get("name") or ""
+        if ab not in self._active:
+            return
+        self._active = [x for x in self._active if x.uid != ab.uid]
+        if not any(x.effect is ab.effect for x in self._active):
+            self._dot_timers.pop(id(ab.effect), None)
+            self._instant_timers.pop(id(ab.effect), None)
+        self._invalidate_buffs_cache()
+        if self._buff_event_handler and name:
+            for tgt in (ab.target_chars or []):
+                self._buff_event_handler("expire", name, ab.caster, tgt, t, t)
+        if name:
+            self.notify(f"event:state_end:{name}", t, ab.caster)
+
+    def heal_shield(self, name: str, amount: float, t: float) -> float:
+        """name의 보호막을 amount만큼 되돌린다 — 실제로 되돌린 양을 반환한다.
+
+        **깎인 만큼만 채운다.** 상한은 각 보호막의 부여 시점 값(`shield_max_per_target`)이고,
+        `absorb_shield`와 같은 순서(나중에 생긴 것부터)로 채운다 — 그쪽이 먼저 깎이는 층이라
+        같은 층을 되돌리는 것이 자연스럽다. ⬜ 층 순서는 흡수 쪽과 같이 잠정이다.
+        **없는 보호막을 새로 만들지는 않는다** — `cover_heal_pct`가 부서진 엄폐물을 되살리지
+        않는 것과 같은 자리다(그쪽의 예외는 `cover_revive`가 따로 연다). 담체가 이미
+        `end_on_shield_consumed`로 끝났다면 `_active`에 없으므로 후보에서 빠진다.
+        """
+        if amount <= 0.0:
+            return 0.0
+        live = [ab for ab in self._active
+                if ab.effect.get("stat") in _SHIELD_STATS
+                and name in ab.shield_max_per_target and t < ab.expires_at]
+        if not live:
+            return 0.0
+        live.sort(key=lambda ab: ab.activated_at, reverse=True)
+        left, total = amount, 0.0
+        for ab in live:
+            room = ab.shield_max_per_target[name] - ab.shield_per_target.get(name, 0.0)
+            if room <= 0.0:
+                continue
+            put = min(room, left)
+            ab.shield_per_target[name] = ab.shield_per_target.get(name, 0.0) + put
+            total += put
+            left -= put
+            if left <= 0.0:
+                break
+        if total > 0.0:
+            # 0이던 보호막이 되살아나면 `during_shield`가 다시 참이 된다
+            self._invalidate_buffs_cache()
         return total
 
     def knock_down(self, name: str, t: float) -> None:
@@ -2894,13 +3271,25 @@ class BuffManager:
         return False
 
     def _expires_at(self, eff: dict, caster: str, t: float) -> float:
-        """이 효과를 지금 걸면 언제 만료되는가. 종료 조건이 없으면 `inf`."""
+        """이 효과를 지금 걸면 언제 만료되는가. 종료 조건이 없으면 `inf`.
+
+        `duration_scaling: "stack_count"`가 붙으면 **지속시간이 다른 상태의 중첩 수에
+        비례**한다(원문 `[N초 X [상태명] 횟수만큼 유지]`). `duration`은 1중첩 분량이고
+        기준은 `duration_scaling_ref`가 가리키는 이름이다 — `scaling: stack_count`가
+        *값*에 하는 일을 지속시간에서 한다. 참조가 없거나 0중첩이면 0초이므로 사실상
+        무발동인데, 그건 원문 그대로다(중첩이 0이면 「0초 유지」다). 그래서 이 문형의
+        컨테이너 담체는 **배열 앞**에 둬야 한다 — 형제가 담체의 중첩을 읽기 때문이다
+        (레이블 `상상 실연`·`망상 파괴 2`, `PARSING-CHARS.md` §레이블).
+        """
         duration = eff.get("duration")
         if duration is None and "duration_values" in eff:
             char = self._char.get(caster, {})
             skill_lv = _get_skill_lv(char, eff)
             dv = eff["duration_values"]
             duration = float(dv.get(skill_lv, dv.get("10", 0.0)))
+        if eff.get("duration_scaling") == "stack_count" and duration not in (None, -1):
+            n = self.ref_count(caster, eff.get("duration_scaling_ref", ""))
+            duration = float(duration) * (n if n is not None else 0)
         return math.inf if duration is None or duration == -1 else t + duration
 
     def _activate(self, eff: dict, caster: str, t: float, suppress_event: bool = False,
@@ -2910,10 +3299,25 @@ class BuffManager:
         `targets`를 주면 효과의 `target` 문자열을 해석하지 않고 그 대상에게 건다 — 보스가 건 효과
         (`apply_boss_effect`)만 쓴다. buff 타입만 받는다."""
         # max_trigger: 전투 중 최대 발동 횟수 제한
+        #
+        # **대상이 0기면 발동권을 쓰지 않는다** (유저 결정 2026-09-21). 카운터를 대상 해석보다
+        # 먼저 깎으면, 게이트가 condition이 아니라 **대상**에만 있는 효과는 아무에게도 닿지
+        # 못한 첫 트리거에서 한 장뿐인 발동권을 태우고 영구히 죽는다 — 앤 : 미라클 페어리
+        # `파란 나비의 꿈 3`(「전투불능 상태 화력형 아군 무작위 1기에게 [부활] [전투 중 1회 발동]」)이
+        # 그 첫 사례다. 조건절이 없어 매 버스트에 트리거가 서고, 쓰러진 아군이 없는 첫 버스트에
+        # 카운터가 소모돼 보스 패턴에서도 발동하지 않았다.
+        #
+        # 지연 resolve 대상(`_LAZY_RESOLVE_PREFIXES`)과 보스가 건 효과(`targets` 지정)는
+        # 여기서 대상을 확정하지 않으므로 종전대로 즉시 소모한다.
         max_trigger = eff.get("max_trigger")
         if max_trigger is not None:
             eid = id(eff)
             if self._trigger_counts.get(eid, 0) >= max_trigger:
+                return
+            raw_target = eff.get("target", "self")
+            if (targets is None and isinstance(raw_target, str)
+                    and not raw_target.startswith(_LAZY_RESOLVE_PREFIXES)
+                    and not self._resolve_target(raw_target, caster)):
                 return
             self._trigger_counts[eid] = self._trigger_counts.get(eid, 0) + 1
 
@@ -3167,6 +3571,19 @@ class BuffManager:
                     for tgt in targets:
                         self._buff_event_handler("activate", name, caster, tgt, t, expires, _val, _stat)
 
+        # 「누적 → 폭발」 누적기: 부여 시점에 상한을 스냅샷하고 누적을 0에서 다시 시작한다.
+        # **재평가가 아니라 스냅샷인 것이 이 메카닉의 작동 조건이다**(유저 결정 2026-09-22) —
+        # 매 프레임 재면 버스트의 공격력 ▲(트로니 +101.37% → 최종 공격력 2.20배)가 상한을
+        # 누적 가속(2.26배)과 같은 폭으로 밀어 올려 문턱이 영영 안 열린다.
+        if eff.get("stat", "") in self._ACCUM_STATS:
+            _ab = next((ab for ab in self._active
+                        if ab.effect is eff and ab.caster == caster), None)
+            if _ab is not None:
+                _pct = self._get_value(eff, _ab, caster) or 0.0
+                _ab.accum = 0.0
+                _ab.accum_done = False
+                _ab.accum_cap = self.final_atk(caster, t) * _pct / 100.0
+
         # event:stat_applied:XXX — stat 유형별 버프 적용 시 해당 target_chars에게 notify
         stat = eff.get("stat", "")
         _STAT_APPLIED_EVENTS = {"dot_dmg_pct", "split_dmg_pct"}
@@ -3178,6 +3595,22 @@ class BuffManager:
 
         # 보호막을 ActiveBuff 수명에 결합해 대상별 생성량을 기록한다. 보호막 상태를
         # 먼저 만든 뒤 적용 이벤트를 쏴야, 같은 프레임의 during_shield 판정이 참이다.
+        # 분신(`decoy`)도 같은 모양으로 대상별 체력을 잡는다 — 원문이 「시전자의 **최종** 최대 체력
+        # 비례 N% 분신」이라 기준·환산이 보호막과 같다. 재발동하면 체력과 상한이 함께 새로 잡힌다
+        # (신데렐라 계열은 버스트마다 다시 세운다).
+        if stat in _DECOY_STATS and targets:
+            ab_ref = next(
+                (ab for ab in self._active if ab.effect is eff and ab.caster == caster),
+                None,
+            )
+            if ab_ref is not None:
+                val = self._get_value(eff, ab_ref, caster)
+                amount = self.effective_max_hp(caster) * val / 100.0 if val is not None else 0.0
+                ab_ref.decoy_per_target = {
+                    tgt: amount for tgt in (ab_ref.target_chars or []) if not _is_enemy(tgt)
+                }
+                ab_ref.decoy_max_per_target = dict(ab_ref.decoy_per_target)
+
         if stat in _SHIELD_STATS and targets:
             ab_ref = next(
                 (ab for ab in self._active if ab.effect is eff and ab.caster == caster),
@@ -3191,6 +3624,8 @@ class BuffManager:
                     tgt: amount * (1.0 + self.take_next_shield_amp(tgt, t) / 100.0)
                     for tgt in (ab_ref.target_chars or []) if not _is_enemy(tgt)
                 }
+                # 회복 상한(`shield_heal_pct`)은 부여 시점 값이다 — 재발동하면 같이 새로 잡힌다
+                ab_ref.shield_max_per_target = dict(ab_ref.shield_per_target)
                 for tgt in ab_ref.shield_per_target:
                     self.notify("event:shield_applied", t, tgt)
 
@@ -3462,9 +3897,14 @@ class BuffManager:
                 # 맡긴다(`_RUNTIME_COND_PREFIXES`). 여기서 조건을 안 보면 조건이 거짓인
                 # 주기 단축이 그대로 먹는다 — 엠마 : 택티컬 업 `포메이션 LT 5~7`은
                 # 은화가 없으면 꺼져야 하는데 30초 주기가 10초로 줄어 버린다.
+                #
+                # `skill_cooldown`(「스킬 N 재사용 시간 N초 ▼」)도 같은 자리다 — 원문 문구가
+                # 다를 뿐 연산이 같다(`target_effect`가 가리키는 주기를 초 단위로 가감).
+                # 도로시 `발현`이 첫 보유자이고, 값이 음수라 주기가 줄어든다(20s → 2s).
                 flat = sum(
                     (self._get_value(ab.effect, ab, caster) or 0.0)
-                    for ab in self._by_stat("effect_interval")
+                    for ab in (self._by_stat("effect_interval")
+                               + self._by_stat("skill_cooldown"))
                     if ab.effect.get("target_effect") == eff_name
                     and (ab.target_chars is None or caster in (ab.target_chars or []))
                     and (
@@ -3676,6 +4116,8 @@ class BuffManager:
 
         if stat == "def_pct" and applies_to_target and not applies_to_caster:
             buff_key = "enemy_def_down_pct"
+        elif stat == "def_caster_based_pct" and applies_to_target and not applies_to_caster:
+            buff_key = "enemy_def_down_flat"
         actual_recipient = caster if applies_to_caster else target
 
         if buff_key in _BOOL_BUFF_KEYS:
@@ -3684,6 +4126,8 @@ class BuffManager:
         val = self._get_value(eff, ab, actual_recipient, stack_override=None)
         if val is None:
             return None
+        if buff_key == "enemy_def_down_flat":
+            val = self._caster_based_def_flat(ab, val)
         buff_key, val = self._route_burst_charge(ab, buff_key, val)
         if stat in _CRIT_RATE_STATS:
             # key 자리에 "일반 공격 한정인가"를 싣는다 — 스킬 딜용 합에서 뺄 기여를 가린다
@@ -3836,6 +4280,10 @@ class BuffManager:
             # 아군 대상 def_pct는 base_stat용 — 데미지엔 무관하므로 def_pct 키로 흘려보내 무시.
             if stat == "def_pct" and applies_to_target and not applies_to_caster:
                 buff_key = "enemy_def_down_pct"
+            # def_caster_based_pct: 적에게 부여되면 **정액** 방어력 감소(②)로 라우팅.
+            # 아군 대상은 종전대로 base_stat용(`_effective_def`)이라 딜 경로에서 무시된다.
+            elif stat == "def_caster_based_pct" and applies_to_target and not applies_to_caster:
+                buff_key = "enemy_def_down_flat"
 
             # boolean 플래그 스탯: 수치 없이 True만 세팅
             if buff_key in _BOOL_BUFF_KEYS:
@@ -3846,6 +4294,8 @@ class BuffManager:
             val = self._get_value(eff, ab, actual_recipient, stack_override=char_stack)
             if val is None:
                 continue
+            if buff_key == "enemy_def_down_flat":
+                val = self._caster_based_def_flat(ab, val)
             buff_key, val = self._route_burst_charge(ab, buff_key, val)
 
             if stat in _CRIT_RATE_STATS:
@@ -4059,6 +4509,9 @@ class BuffManager:
             elif cond == "self_cover_alive":
                 if not self.cover_alive(buff_caster):
                     return False
+            elif cond == "not_self_cover_alive":
+                if self.cover_alive(buff_caster):
+                    return False
             elif cond == "focusing":
                 # 포커싱 = 카메라를 잡고 있다. 카메라는 조작 주인을 따라가고, 없으면 정적 유도값이다
                 if buff_caster not in self.state.get("camera", ()):
@@ -4110,6 +4563,12 @@ class BuffManager:
             elif cond.startswith("not_target_state:"):
                 state_name = cond[len("not_target_state:"):]
                 if self._has_target_state(state_name):
+                    return False
+            elif cond.startswith("target_code:"):
+                # `_condition_ok`와 같은 규약 — 코드 미지정 적은 통과시킨다
+                code = cond[len("target_code:"):]
+                enemy_code = self.state.get("enemy", {}).get("code", "")
+                if enemy_code and enemy_code != code:
                     return False
             elif cond.startswith("enemy_count_below:"):
                 # 적 수 = 보스 1 + 산 쫄몹. 쫄몹이 없으면 1 — "랩쳐 N기 이하" → 1 <= N (N>=1이면 항상 참)
@@ -4325,6 +4784,29 @@ class BuffManager:
             pool = [x for x in self._alive() if cur.get(x, 0.0) > 0.0 and mx.get(x, 0.0) > 0.0]
             pool.sort(key=lambda x: (cur[x] / mx[x], self.squad_names.index(x)))
             return pool[:n]
+        # "엄폐물이 파괴된 아군 무작위 N기" — 위 키와 정확히 반대 필터다.
+        # `allies_random:N`(자신 제외)과 달리 **시전자를 빼지 않는다**(원문에 제외 표기가 없다).
+        # 지금 부서져 있는가가 곧 부여 시점 판정이라 지연 resolve 대상이 아니다.
+        # 엄폐물은 보스 공격 패턴에만 부서지므로 기본 경로에서는 늘 0기 = 무발동이다.
+        # 비스킷 `산책 훈련` (`cover_revive`의 대상)
+        if target.startswith("allies_broken_cover_random:"):
+            n = int(target.split(":")[1])
+            pool = [x for x in self._alive() if not self.cover_alive(x)]
+            return random.sample(pool, min(n, len(pool)))
+
+        # "전투불능 상태 [클래스] 아군 무작위 N기" — `allies_down_` 접두사라
+        # `_resolve_target()`의 전투불능 제외 규칙에서 함께 빠진다(마나 `매터 감마 3`과 같은 자리).
+        # **원문에 「자신을 제외한」이 없으므로 시전자를 빼지 않는다** — 빼는 쪽은
+        # `allies_down_top_atk_excl:N`이다. 무작위라 지연 resolve 대상이 아니고,
+        # 후보가 N보다 적으면 있는 만큼·0기면 빈 목록이다.
+        # 아군은 보스 공격 패턴이 있을 때만 쓰러지므로 기본 경로에서는 늘 0기다.
+        # (앤 : 미라클 페어리 `파란 나비의 꿈 3` — `revive`의 대상)
+        if target.startswith("allies_down_class_random:"):
+            _, cls, n_raw = target.split(":")
+            down = self.state.get("down") or ()
+            pool = [x for x in self.squad_names
+                    if x in down and _NIKKE[x]["class"] == cls]
+            return random.sample(pool, min(int(n_raw), len(pool)))
 
         if target.startswith("allies_lowest_atk_burst3:"):
             n = int(target.split(":")[1])
@@ -4414,9 +4896,19 @@ class BuffManager:
             casted = self.state.get("burst_casted", {})
             return [n for n in self.squad_names
                     if casted.get(n) and _NIKKE[n]["weapon_type"] == wtype]
+        # `allies_class:클래스` (전체) · `allies_class:클래스:N` (인원수 제한).
+        # N이 붙으면 **스쿼드 입력 순서로 앞 N명**이다 — 원문 「방어형 아군 2기에게」에는
+        # 정렬 기준(`가장 ~한`)이 없고, 같은 모양인 `아군 N기에게`(`allies:N`)가
+        # `squad_names[:n]`이라 같은 규약으로 읽는다. 고정 속성 기반이라 지연 resolve가 아니다.
+        # **세 칸짜리를 두 칸으로 읽던 동안에는 인원수가 조용히 무시돼 「전체」가 됐다**
+        # (키리 `훑어보기`·`곁눈질 2` — 방어형 3명 스쿼드에서 셋 다 받았다, 2026-09-23 수정).
         if target.startswith("allies_class:"):
-            cls = target.split(":")[1]
-            return [n for n in self.squad_names if _NIKKE[n]["class"] == cls]
+            parts = target.split(":")
+            cls = parts[1]
+            pool = [n for n in self.squad_names if _NIKKE[n]["class"] == cls]
+            if len(parts) > 2 and parts[2].isdigit():
+                return pool[:int(parts[2])]
+            return pool
         # "동일 스쿼드 아군 전체" — 소속 스쿼드(`parsed_nikke["squad"]`, 앱솔루트·카운터스
         # ·이지스 등)가 시전자와 같은 아군. **시전자 포함**이고, 스쿼드가 없는 더미
         # (`test_B*`)는 빠진다 — condition `squad_ally_exists`와 같은 기준의 대상판이다.
@@ -4537,6 +5029,55 @@ class BuffManager:
         if duration is None or duration == -1:
             return None
         return self.ref_count(caster, eff["scaling_ref"])
+
+    def _caster_based_def_flat(self, ab: "ActiveBuff", pct: float) -> float:
+        """`시전자 기준 방어력 N%`를 **정액** 방어력으로 환산한다 (적 대상판).
+
+        기준은 시전자의 **기본**(버프 제외) 방어력이다 — `시전자 기준` 문형의 공통 규약이고
+        (`atk_caster_based_pct`·`hp_only_caster_based_pct`와 같다), 아군판
+        `_effective_def()`의 `def_caster_based_pct` 분기도 같은 값을 쓴다.
+        `pct`는 `_get_value()`가 이미 중첩까지 곱해 넘긴 값이라 여기서는 곱하지 않는다.
+        """
+        caster_def = self.state.get("base_stats", {}).get(ab.caster, {}).get("def", 0.0)
+        return caster_def * (pct / 100.0)
+
+    def _caster_based_atk_flat(self, ab: "ActiveBuff", pct: float) -> float:
+        """`시전자 기준 공격력 N%`를 **정액** 공격력으로 환산한다 (적 대상판).
+
+        위 `_caster_based_def_flat`의 공격력판이고 규약이 같다 — 기준은 시전자의
+        **기본**(버프 제외) 공격력이고, `pct`는 `_get_value()`가 이미 중첩까지 곱해 넘긴 값이다.
+        아군판(`get_buffs()` 후처리의 `atk_caster_based_pct` 루프)도 같은 `base_stats` ATK를 읽는다.
+        """
+        caster_atk = self.state.get("base_stats", {}).get(ab.caster, {}).get("atk", 0.0)
+        return caster_atk * (pct / 100.0)
+
+    def enemy_atk_down_flat(self, enemy_id: str, t: float) -> float:
+        """적에게 걸린 `atk_caster_based_pct`의 **정액** 공격력 증감 합(감소면 음수).
+
+        적 대상 `def_caster_based_pct` → `enemy_def_down_flat`의 공격력판이다(키리 `곁눈질`).
+        다만 소비처가 하나뿐이라 — 보스 → 니케 피해(`timeline._boss_attack`) — `get_buffs()`의
+        버프 사전에 자리를 두지 않고 **직접 조회**한다(`cover_hp_pct`·`heal_received_mult`와 같은 자리).
+        딜 계산에는 닿지 않는다: 적 공격력은 니케가 적을 때리는 식에 들어가지 않는다.
+
+        아군 대상 `atk_caster_based_pct`는 여기 오지 않는다 — `enemy_id`가 `__enemy__` 센티널
+        (또는 쫄몹 id)이라 아군에게만 걸린 버프는 `target_chars`에 그 id가 없다.
+        """
+        total = 0.0
+        for ab in self._by_stat("atk_caster_based_pct"):
+            if t >= ab.expires_at:
+                continue
+            tgts = ab.target_chars if ab.target_chars is not None else self._resolve_lazy(ab)
+            if enemy_id not in (tgts or ()):
+                continue
+            if ab.has_runtime_conditions:
+                conditions = ab.effect["trigger"].get("condition", [])
+                if not self._runtime_condition_ok(conditions, ab.caster, ab.caster, enemy_id, t):
+                    continue
+            val = self._get_value(ab.effect, ab, ab.caster)
+            if val is None:
+                continue
+            total += self._caster_based_atk_flat(ab, val)
+        return total
 
     def _effective_def(self, name: str) -> float:
         """활성 버프(def_pct, def_caster_based_pct)를 반영한 최종 방어력.
@@ -4670,6 +5211,7 @@ class BuffManager:
         self._dot_timers.clear()
         self._ramp_pending.clear()
         self._instant_timers.clear()
+        self._accum_last.clear()
         self._lazy_target_cache.clear()
         self._event_counts.clear()
         self._down_lost.clear()

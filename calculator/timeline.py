@@ -3376,8 +3376,9 @@ class BurstController:
         # 풀버스트 진입 시 발동할 버스트 대미지 (버프 적용 후 계산)
         self._pending_burst_dmg: list[tuple[str, dict, int]] = []  # (caster, eff, hit_count)
 
-        # 현재 풀버스트 사이클의 3단계 버스트 발동자 (fullburst_duration 귀속용)
+        # 현재 풀버스트 사이클의 3단계 버스트 발동자와 그 발동 시각 (fullburst_duration 귀속용)
         self._fb_caster: str = ""
+        self._fb_caster_t: float = -1.0
 
         # verbose 로그 (simulate에서 주입)
         self._log: SimLog | None = None
@@ -3530,9 +3531,18 @@ class BurstController:
                 if key in seen_effects:
                     continue
                 # burst_cast 타이밍으로 등록된 fullburst_duration은
-                # 해당 caster가 이번 풀버스트의 3단계 발동자일 때만 반영
+                # 해당 caster가 이번 풀버스트의 3단계 발동자이고, **이번 버스트에서 실제로
+                # 부여된** 것일 때만 반영한다. 이 stat은 보관 편의상 `duration: -1`(영구)로
+                # 적히므로(`PARSING.md` §4 「풀 버스트 타임 동안 지속」) 조건이 붙은 항목은
+                # 한 번 켜지면 조건이 거짓이 된 뒤에도 `_active`에 남는다 — 발동 시각을 같이
+                # 보지 않으면 그 뒤 모든 자기 버스트 사이클에 계속 실린다.
+                # 조건이 없는 기존 보유자(모더니아 `신세계` · 이사벨 `소닉 체이서 5`)는 자기
+                # 버스트마다 재발동해 `activated_at`이 갱신되므로 영향이 없다.
+                # (D `처단 3` — `self_stun_immune`이 36.95초 뒤 거짓이 된다)
                 timings = ab.effect.get("trigger", {}).get("timing", [])
-                if "burst_cast" in timings and ab.caster != self._fb_caster:
+                if "burst_cast" in timings and (
+                        ab.caster != self._fb_caster
+                        or ab.activated_at < self._fb_caster_t - 1e-9):
                     continue
                 val = ab.effect.get("fixed_value")
                 if val is None:
@@ -3902,6 +3912,7 @@ class BurstController:
         # 3단계 버스트 발동자를 기록 (fullburst_duration 귀속용)
         if stage == "3":
             self._fb_caster = name
+            self._fb_caster_t = t
 
         # 스킬3의 instant/damage 타입은 모두 위 bm.notify("burst_cast") 경로에서 처리된다
 
@@ -4034,7 +4045,9 @@ def _register_instant_handlers(bm, char_states: dict[str, "CharState"], burst_ct
             heal = heal_base * val / 100.0 * bm.heal_received_mult(name, t)
             hp[name] = min(hp.get(name, base_hp) + heal, max_hp)
             bm.sync_hp(name)
-            bm.notify("event:heal_received", t, name)
+            # `heal_source`는 이 회복을 **건** 쪽이다 — 받는 쪽(`name`)과 구분해야
+            # 「자신이 사용한 회복 효과가 아니라면」(`not_self_caused_heal`)이 성립한다.
+            bm.notify("event:heal_received", t, name, heal_source=caster)
 
     def handle_current_hp_reduce(eff, caster, t, val):
         # `[현재 체력 N% ▼]`은 *현재* 체력의 N%다 — 최대 체력 기준 정액이 아니다.
@@ -4062,6 +4075,67 @@ def _register_instant_handlers(bm, char_states: dict[str, "CharState"], burst_ct
                 base = bm.effective_max_hp(caster) if caster_based else mx[name]
                 cur[name] = min(mx[name], cur[name] + base * val / 100.0)
                 bm.notify("event:cover_healed", t, name)
+
+    def handle_shield_heal_pct(eff, caster, t, val):
+        # `[보호막 체력 회복 N%]` — **이미 있는 보호막이 깎인 만큼 되돌린다.**
+        # `cover_heal_pct`의 보호막판이고 기준 규약도 같다: `scaling: "max_hp"`면
+        # **시전자의 최종 최대 체력** N%, 표기가 없으면 그 대상의 보호막 최대치 N%다
+        # (지금 로스터의 보유자 셋은 전부 전자다 — `PARSING.md` §7-10).
+        #
+        # 없는 보호막을 새로 만들지 않는다 — 생성은 `shield_from_max_hp_pct`,
+        # 생성량 증폭은 `next_shield_hp_pct`, 회복은 이쪽으로 축이 셋이다.
+        # 보호막은 보스 공격 패턴이 있을 때만 깎이므로 **기본 경로에서는 늘 만피 = 회복량 0**이다
+        # (`cover_heal_pct`와 같은 자리). 회복 이벤트는 쏘지 않는다 — 「보호막 체력 회복 시」를
+        # 트리거로 쓰는 효과가 로스터에 없다(⬜ 생기면 `event:cover_healed`의 오버힐 규약을 따른다).
+        # 킬로 `자가 수복` · 라푼젤 : 퓨어 그레이스 `프레이 3`
+        if not val:
+            return
+        caster_based = eff.get("scaling") == "max_hp"
+        for name in _resolve_targets(eff, caster):
+            base = bm.effective_max_hp(caster) if caster_based else bm.shield_capacity(name)
+            bm.heal_shield(name, base * val / 100.0, t)
+
+    def handle_decoy_heal_pct(eff, caster, t, val):
+        # `[시전자의 최종 최대 체력 비례 디코이 회복 N%]` — **이미 있는 분신이 깎인 만큼 되돌린다.**
+        # `shield_heal_pct`(보호막)·`cover_heal_pct`(엄폐물)와 같은 층이고 대상만 분신이다:
+        # `scaling: "max_hp"`면 **시전자의 최종 최대 체력** N%, 표기가 없으면 그 대상의 분신
+        # 최대치 N%다(지금 보유자 라이는 둘 다 전자 — `PARSING.md` §7-10).
+        #
+        # 없는 분신을 새로 만들지 않는다 — 생성은 `decoy`다. 분신은 보스 공격 패턴이 있을 때만
+        # 깎이므로 **기본 경로에서는 늘 만피 = 회복량 0**이다. 주기판(`[N초 간격]`)도 같은 핸들러가
+        # 받는다 — `tick_interval`이 붙은 instant는 타이머가 같은 자리를 반복 호출한다.
+        # 라이 `선배의 응원 2`(60발마다) · `선배의 모범 2`(버스트, 1초 간격 10초)
+        if not val:
+            return
+        caster_based = eff.get("scaling") == "max_hp"
+        for name in _resolve_targets(eff, caster):
+            base = bm.effective_max_hp(caster) if caster_based else bm.decoy_capacity(name)
+            bm.heal_decoy(name, base * val / 100.0, t)
+
+    def handle_cover_revive(eff, caster, t, val):
+        # `[엄폐물 체력 N%로 엄폐물 부활]` — **부서진 엄폐물 전용**이다.
+        # `cover_heal_pct`(살아 있는 엄폐물만 회복)와 정확히 배타이고, 그쪽의
+        # 「부서진 엄폐물은 되살아나지 않는다」 규약을 여는 유일한 경로다.
+        #
+        # 기준은 그 **대상의** 엄폐물 최대 체력이다 — 원문에 「시전자의 …」 수식이 없다
+        # (있으면 붙는다. 같은 캐릭터 비스킷 스킬1이 그 예다). `cover_heal_pct`의
+        # 기준 표기 규약과 같다.
+        #
+        # `event:cover_healed`는 보내지 않는다 — 원문이 「회복」이 아니라 「부활」이고,
+        # 그 트리거의 정본 서술이 「부서진 엄폐물은 회복되지 않으므로 무발동」이다
+        # (GAMEPLAY §트리거 발동 의미). ⬜ 인게임 미확인 — 부활을 회복으로 치는지는
+        # 확인되지 않았고, 유일한 소비자는 티아 `파충류 애호가`다.
+        #
+        # 엄폐물은 보스 공격 패턴이 있을 때만 부서지므로 기본 경로에서는 대상이 0기다.
+        # 비스킷 `산책 훈련`(`allies_broken_cover_random:2`) ·
+        # 베이 `퍼스트 위너`(애장품 3단계, `self` + `not_self_cover_alive` + `max_trigger:1`)
+        if not val:
+            raise ValueError(f"{caster} `{eff.get('name')}`: cover_revive에 체력 % 수치가 없다")
+        cur, mx = bm.state["cover_hp"], bm.state["cover_max_hp"]
+        for name in _resolve_targets(eff, caster):
+            if cur.get(name, 0.0) > 0.0:
+                continue        # 멀쩡한 엄폐물은 대상이 아니다
+            bm.revive_cover(name, mx.get(name, 0.0) * val / 100.0)
 
     def handle_burst_reentry(eff, caster, t, val):
         # `[버스트 재진입 N단계]` — `fixed_value`가 단계 N. 이번 버스트 1회의 사건이라 buff로
@@ -4101,6 +4175,9 @@ def _register_instant_handlers(bm, char_states: dict[str, "CharState"], burst_ct
     bm.register_instant_handler("current_hp_reduce", handle_current_hp_reduce)
     bm.register_instant_handler("force_reload", handle_force_reload)
     bm.register_instant_handler("cover_heal_pct", handle_cover_heal_pct)
+    bm.register_instant_handler("shield_heal_pct", handle_shield_heal_pct)
+    bm.register_instant_handler("decoy_heal_pct", handle_decoy_heal_pct)
+    bm.register_instant_handler("cover_revive", handle_cover_revive)
     bm.register_instant_handler("burst_reentry", handle_burst_reentry)
     bm.register_instant_handler("revive", handle_revive)
 
@@ -4610,6 +4687,26 @@ def simulate(
         cs = char_states.get(caster)
         if cs is None:
             return
+
+        # 「누적 → 폭발」 방출 — 계수가 없다. 대미지가 누적기(`target_effect`)가 모은 양
+        # **그 자체**라 DealForm을 타지 않는다(유저 결정 2026-09-22: 누적은 방어력 적용 후
+        # 값이고 방출은 그대로 꽂는다 — 재적용하면 이중 경감이다). 분배 대미지 판정이라
+        # ⑥층 `split_dmg_pct`만 얹는다 — 트로니가 `효율 증가`로 자기 폭발을 키우는 경로다.
+        if eff.get("stat", "") == "accum_split_damage":
+            ref = eff.get("target_effect", "")
+            amount = bm.accum_discharge(ref, t) if ref else 0.0
+            if amount <= 0.0:
+                return
+            _b = bm.get_buffs(caster, "__enemy__", t)
+            amount *= 1.0 + _b.get("split_dmg_pct", 0.0) / 100.0
+            _rule = eff.get("target", "")
+            _dot_events.append(HitEvent(
+                t=t, caster=caster, damage=int(amount), is_crit=False,
+                hit_tag="accum_split_damage", skill_name=eff.get("name", ref),
+                rule=_rule if isinstance(_rule, str) else "", split=True,
+            ))
+            return
+
         skill_lv = _get_skill_lv(cs.char, eff)
         if "values" in eff:
             vals = eff["values"]
@@ -4746,6 +4843,14 @@ def simulate(
             # 대상 설명이 '적 전체에게'인 버스트 대미지 → burst_dmg_aoe_pct 수혜
             is_aoe_burst=(base_stat in ("burst_damage", "armor_break_burst_damage")
                           and target_field == "all_enemies"),
+            # 대상 설명이 '~ 적 1기에게'인 버스트 대미지 → burst_dmg_single_pct 수혜.
+            # 원문 문구가 가르는 축이라 `enemies_*:1` 계열만이다 — `대상에게`(target)·
+            # `타겟에게`(boss)·`동일 적 대상에게`(same_target)는 문구가 달라 제외한다
+            # (IMPL-STATUS `burst_dmg_single_pct`). 위 AoE판과 배타.
+            is_single_burst=(base_stat in ("burst_damage", "armor_break_burst_damage")
+                             and isinstance(target_field, str)
+                             and target_field.startswith("enemies_")
+                             and target_field.endswith(":1")),
             is_pierce_damage=(base_stat == "pierce_damage"),
             is_armor_break_damage=(base_stat in ("armor_break_damage",
                                                  "armor_break_burst_damage")),
@@ -4882,7 +4987,11 @@ def simulate(
         max_hp = bm.effective_max_hp(ev.caster)
         hp[ev.caster] = min(hp.get(ev.caster, base_hp) + heal, max_hp)
         bm.sync_hp(ev.caster)
-        bm.notify("event:heal_received", t, ev.caster)
+        # 라이프스틸의 `heal_source`는 **때린 본인**이다 (자체 판단 2026-09-21 — 유저 확인 전).
+        # 버프를 건 아군이 따로 있어도 회복은 그 니케 자신의 공격에서 나오고, `buffs`는
+        # 합산값이라 여러 라이프스틸이 겹쳤을 때 어느 아군의 몫인지 가를 수 없다.
+        # ⬜ 인게임에서 아군이 걸어 준 라이프스틸을 「남이 쓴 회복 효과」로 치는지는 미확인.
+        bm.notify("event:heal_received", t, ev.caster, heal_source=ev.caster)
 
     def _land_boss(ev: HitEvent, t: float) -> None:
         if boss is not None and not boss.gate(ev):
@@ -4890,6 +4999,9 @@ def simulate(
         result.hits.append(ev)
         result.char_total[ev.caster] += ev.damage
         _apply_lifesteal(ev, bm, base_stats, t)
+        # 「누적 → 폭발」 누적기 — 보스가 실제로 받은 딜만 센다. 쫄몹 몫은 `boss.route`가
+        # 이미 갈라 갔고 저지원은 총딜 밖이라 여기 오지 않는다 (트로니 · 도로시)
+        bm.accumulate_damage(ev.caster, ev.damage, t)
         if boss is None or not (ev.part_damage or ev.interrupt_damage):
             return
         # 좌표 off 다중 타격 — 같은 발이 닿은 파츠마다 히트가 하나씩 더 들어가 총딜에 더해진다. 닿은 저지원은
@@ -4901,6 +5013,7 @@ def simulate(
             result.hits.append(pev)
             result.char_total[pev.caster] += pev.damage
             _apply_lifesteal(pev, bm, base_stats, t)
+            bm.accumulate_damage(pev.caster, pev.damage, t)
         for _name in boss.interrupt_hits(ev, t):
             _apply_lifesteal(replace(ev, damage=ev.interrupt_damage), bm, base_stats, t)
 
@@ -4978,72 +5091,122 @@ def simulate(
         — 니케가 적을 때리는 식(damage.py ②·①·⑥)과 같은 모양이다(유저 결정). 크리는 없다.
 
         층 (유저 확인):
-          비관통 — 맨 앞 한 층만 받는다. 보호막 → (엄폐 중이고 엄폐물이 살아 있으면) 엄폐물 → 체력.
+          비관통 — 맨 앞 한 층만 받는다. 보호막 → (엄폐 중이고 엄폐물이 살아 있으면) 엄폐물
+                   → (엄폐 중이 **아니고** 분신이 살아 있으면) 분신 → 체력.
                    **앞 층이 깨져도 남은 피해는 넘어가지 않는다.** 보호막이 여럿이면 나중에 생긴
                    하나가 맨 앞이다(⬜ 순서는 잠정).
           관통   — 보호막 **전부**·(엄폐 중이면) 엄폐물·체력이 **같은 피해를 각각** 받는다.
-        엄폐물이 부서졌으면 엄폐해도 막아 주지 않는다. 무적은 체력 피해만 0으로 한다 —
+                   분신은 관통도 가르지 않는다 — 막이 아니라 별개 개체다.
+        엄폐물이 부서졌으면 엄폐해도 막아 주지 않는다. **분신은 엄폐물의 짝이다** — 엄폐물이
+        엄폐 중에 대신 맞는 자리를, 분신은 나와서 사격 중일 때 대신 맞는다(유저 2026-09-21,
+        ⬜ 인게임 미확인). 무적은 체력 피해만 0으로 한다 —
         피격 이벤트는 그대로 나간다(⬜ 인게임 미확인, docs/DATA_VERIFY.md).
+
+        `받는 대미지 균등 분배`(`received_dmg_split_even`)가 걸려 있으면 계산이 끝난 피해를
+        집단 머릿수로 나눠 멤버마다 `_land`한다 — 아래 주석 참조.
         """
         spec = hit.spec
         atk = spec.atk if spec.atk is not None else float(enm.get("atk", DEFAULT_BOSS_ATK))
+        # 적에게 걸린 「시전자 기준 공격력 ▼」(`atk_caster_based_pct`)를 **정액**으로 깎는다.
+        # 아군판 `enemy_def_down_flat`이 적 방어력을 깎는 것의 공격력판이고 부호 규약도 같다
+        # (감소면 음수). 적 공격력은 이 식에만 쓰이므로 딜 계산에는 닿지 않는다 — 키리 `곁눈질`.
+        # ⬜ 쫄몹이 쏜 발은 깎지 않는다: `hit.source`가 쫄몹의 **표시 이름**이라 적 id
+        # (`__enemy__:<패턴>#<번호>`)로 되돌릴 배선이 없다. 쫄몹에게 이 디버프를 걸고 그 쫄몹이
+        # 쏘는 조합은 아직 로스터에 없다 (docs/DATA_VERIFY.md §보스 → 니케 피해).
+        if not hit.source:
+            atk = max(atk + bm.enemy_atk_down_flat("__enemy__", t), 0.0)
         for name in _attack_targets(spec, t):
             if bm.is_down(name):
                 continue
-            cs = char_states[name]
             dmg = (max(atk - bm._effective_def(name), 0.0) * spec.coeff / 100.0
                    * max(0.0, 1.0 + bm.incoming_dmg_pct(name, t) / 100.0))
             dmg = max(dmg, 1.0)
-            # 엄폐 불가(`cover_disabled`)면 재장전 중이어도 엄폐물 뒤가 아니다
-            covered = (cs.in_cover(t) and state["cover_hp"][name] > 0.0
-                       and not cs.cover_blocked(t, bm))
-            shield = bm.absorb_shield(name, dmg, t, pierce=spec.pierce)
-            cover = 0.0
-            if spec.pierce or shield <= 0.0:
-                if covered:
-                    cover = min(state["cover_hp"][name], dmg)
-                    state["cover_hp"][name] -= cover
-                    if state["cover_hp"][name] <= 0.0:
-                        bm.break_cover(name)
-                        boss.log_squad(t, hit.pattern, "cover_break", name)
-            to_hp = dmg if (spec.pierce or (shield <= 0.0 and cover <= 0.0)) else 0.0
-            if to_hp and bm.has_live_stat(name, "invincible", t):
+            # 받는 대미지 균등 분배 — **맞은 니케 기준으로 계산이 끝난 피해**를 집단이 똑같이 나눠 진다
+            # (폴리 `도그 테라피 2` · 율하 `위크 메이커 2` · 자칼 `치얼업 자칼`).
+            # 방어력·받는 피해 증감은 맞은 니케 것으로 한 번만 본다 — 원문이 나누는 대상이 「받는
+            # 대미지」이기 때문이다(⬜ 인게임 미확인: 멤버마다 자기 방어력으로 다시 계산하는지).
+            # 보호막·엄폐물·무적·불굴은 멤버마다 자기 것이 막고, 피격 이벤트는 **맞은 니케만** 받는다 —
+            # 나눠 진 쪽은 피해를 받았을 뿐 맞은 것이 아니다(⬜ 인게임 미확인).
+            group = bm.split_group(name, t)
+            if group:
+                share = dmg / len(group)
+                for member in group:
+                    _land_squad(member, share, hit, t, notify_hit=(member == name))
+            else:
+                _land_squad(name, dmg, hit, t, notify_hit=True)
+
+    def _land_squad(name: str, dmg: float, hit: AttackHit, t: float, *, notify_hit: bool) -> None:
+        """계산이 끝난 한 발의 피해를 니케 하나의 층에 넣는다 — `_boss_attack`의 대상별 몸통.
+
+        층 규칙과 무적·불굴 처리는 `_boss_attack` docstring이 정본이다. `notify_hit`이 거짓이면
+        피격 이벤트를 쏘지 않는다(균등 분배로 피해만 나눠 받은 멤버).
+        """
+        spec = hit.spec
+        if bm.is_down(name):
+            return
+        cs = char_states[name]
+        # 엄폐 불가(`cover_disabled`)면 재장전 중이어도 엄폐물 뒤가 아니다
+        covered = (cs.in_cover(t) and state["cover_hp"][name] > 0.0
+                   and not cs.cover_blocked(t, bm))
+        shield = bm.absorb_shield(name, dmg, t, pierce=spec.pierce)
+        cover = 0.0
+        if spec.pierce or shield <= 0.0:
+            if covered:
+                cover = min(state["cover_hp"][name], dmg)
+                state["cover_hp"][name] -= cover
+                if state["cover_hp"][name] <= 0.0:
+                    bm.break_cover(name)
+                    boss.log_squad(t, hit.pattern, "cover_break", name)
+        to_hp = dmg if (spec.pierce or (shield <= 0.0 and cover <= 0.0)) else 0.0
+        # 분신(`decoy`) — 보호막·엄폐물 **다음**, 체력 **바로 앞** 층이다.
+        # **엄폐 중이 아닐 때만** 대신 맞는다: 엄폐물이 엄폐 중에 대신 맞는 것의 짝으로,
+        # 분신은 니케가 나와서 **사격 중일 때** 대신 맞는다(유저 2026-09-21, ⬜ 인게임 미확인 —
+        # `docs/DATA_VERIFY.md` §보스 → 니케 피해). 그래서 엄폐물과 분신은 사실상 배타다.
+        # 받았으면 그 한 발은 거기서 끝난다(보호막·엄폐물과 같은 규약) — 관통도 가르지 않는다.
+        decoy = 0.0
+        if to_hp and not covered:
+            decoy = bm.absorb_decoy(name, to_hp, t)
+            if decoy > 0.0:
                 to_hp = 0.0
-            # 불굴(`undying`) — 체력이 0이 될 발을 1 남기고 받는다. 쓰러지지 않았으니 아래 임계 이벤트는
-            # 정상으로 나간다(유저 확인 2026-09-15).
-            if (to_hp and state["hp"][name] - to_hp <= 0.0
-                    and bm.has_live_stat(name, "undying", t)):
-                to_hp = max(state["hp"][name] - 1.0, 0.0)
-            # **체력이 0에 닿은 발은 곧바로 전투불능이다.** 임계 이벤트(`hp_below:T`)를 쏘지 않는다 —
-            # 쏘면 「체력 20% 이하 도달 시 최대 체력 ▲」(목단 `근성`)가 이미 0이 된 체력을 되살린다
-            # (유저 확인 2026-09-15 — 인게임도 그냥 쓰러진다).
-            fell = bool(to_hp) and state["hp"][name] - to_hp <= 0.0
-            if to_hp:
-                state["hp"][name] = max(0.0, state["hp"][name] - to_hp)
-                if not fell:
-                    bm.sync_hp(name)
-            # 공격에 딸린 디버프는 **체력에 피해가 들어간 발만** 건다(유저 확인 2026-09-15) — 보호막·엄폐물이
-            # 받았거나 무적이면 안 걸리고, 이 발로 쓰러지면 걸어 봐야 곧바로 사라진다. 피격 트리거보다 먼저 —
-            # 맞은 발의 효과가 붙은 뒤에 니케가 반응한다.
-            if spec.debuffs and to_hp and not fell:
-                boss.note_debuff(hit.pattern, sum(
-                    bm.apply_boss_effect(d.effect, name, t) for d in spec.debuffs))
+        if to_hp and bm.has_live_stat(name, "invincible", t):
+            to_hp = 0.0
+        # 불굴(`undying`) — 체력이 0이 될 발을 1 남기고 받는다. 쓰러지지 않았으니 아래 임계 이벤트는
+        # 정상으로 나간다(유저 확인 2026-09-15).
+        if (to_hp and state["hp"][name] - to_hp <= 0.0
+                and bm.has_live_stat(name, "undying", t)):
+            to_hp = max(state["hp"][name] - 1.0, 0.0)
+        # **체력이 0에 닿은 발은 곧바로 전투불능이다.** 임계 이벤트(`hp_below:T`)를 쏘지 않는다 —
+        # 쏘면 「체력 20% 이하 도달 시 최대 체력 ▲」(목단 `근성`)가 이미 0이 된 체력을 되살린다
+        # (유저 확인 2026-09-15 — 인게임도 그냥 쓰러진다).
+        fell = bool(to_hp) and state["hp"][name] - to_hp <= 0.0
+        if to_hp:
+            state["hp"][name] = max(0.0, state["hp"][name] - to_hp)
+            if not fell:
+                bm.sync_hp(name)
+        # 공격에 딸린 디버프는 **체력에 피해가 들어간 발만** 건다(유저 확인 2026-09-15) — 보호막·엄폐물이
+        # 받았거나 무적이면 안 걸리고, 이 발로 쓰러지면 걸어 봐야 곧바로 사라진다. 피격 트리거보다 먼저 —
+        # 맞은 발의 효과가 붙은 뒤에 니케가 반응한다.
+        # 균등 분배로 피해만 나눠 받은 멤버(`notify_hit` 거짓)에게는 안 건다 — 피격 이벤트와 같은 이유다.
+        if spec.debuffs and to_hp and not fell and notify_hit:
+            boss.note_debuff(hit.pattern, sum(
+                bm.apply_boss_effect(d.effect, name, t) for d in spec.debuffs))
+        if notify_hit:
             bm.notify("received_hit", t, name)
-            if cover:
-                bm.notify("event:cover_hit", t, name)
-            fell = fell and not bm.is_down(name)
-            if fell:
-                state["hp"][name] = 0.0     # 피격 트리거의 회복이 끼어들었어도 쓰러진 발이다
-            boss.note_attack(hit.pattern, to_hp)
-            result.squad_hits.append(SquadHitEntry(
-                t=t, pattern=hit.pattern, target=name, damage=dmg, pierce=spec.pierce,
-                shield=shield, cover=cover, hp=to_hp, hp_after=state["hp"][name], down=fell,
-                by=hit.source))
-            if fell:
-                bm.knock_down(name, t)
-                cs.on_down(t, bm)
-                boss.log_squad(t, hit.pattern, "down", f"{name} ({hit.source})" if hit.source else name)
-                bm.notify_down(name, t)     # 정리가 끝난 뒤 — 부활이 여기서 나올 수 있다
+        if cover:
+            bm.notify("event:cover_hit", t, name)
+        fell = fell and not bm.is_down(name)
+        if fell:
+            state["hp"][name] = 0.0     # 피격 트리거의 회복이 끼어들었어도 쓰러진 발이다
+        boss.note_attack(hit.pattern, to_hp)
+        result.squad_hits.append(SquadHitEntry(
+            t=t, pattern=hit.pattern, target=name, damage=dmg, pierce=spec.pierce,
+            decoy=decoy, shield=shield, cover=cover, hp=to_hp,
+            hp_after=state["hp"][name], down=fell, by=hit.source))
+        if fell:
+            bm.knock_down(name, t)
+            cs.on_down(t, bm)
+            boss.log_squad(t, hit.pattern, "down", f"{name} ({hit.source})" if hit.source else name)
+            bm.notify_down(name, t)     # 정리가 끝난 뒤 — 부활이 여기서 나올 수 있다
 
     def _boss_debuff(hit: AttackHit, t: float) -> None:
         """`debuff` 패턴의 한 발 — 대상을 공격과 같은 규칙(도발·은신 포함, 유저 확인)으로 고르고 목록의 디버프를
