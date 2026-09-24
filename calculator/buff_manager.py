@@ -707,6 +707,8 @@ class BuffManager:
 
         # 이벤트별 발동 횟수 (hit_count, burst_cast_count 등 추적용)
         self._event_counts: dict[str, dict[str, int]] = {}  # caster → {event_key: count}
+        # `buff_max_stack_add`가 수령자·비수령자 공유 ActiveBuff를 건너뛴 횟수(근사 계측용)
+        self.partial_skips: int = 0
 
         # 전투불능 때 잃은 영구 버프: 니케 → [(effect, 시전자)]. 부활 때 패시브만 골라 다시 붙인다
         # (`knock_down` · `_reapply_passives`)
@@ -735,6 +737,13 @@ class BuffManager:
         # 쫄몹이 살아 있을 때 적 대상 문자열을 적 id 목록으로 푸는 콜백 — 타임라인이 보스 패턴에 summon이
         # 있을 때만 넣는다(`BossScript.resolve_enemies`). 쫄몹이 없으면 None을 돌려주고 종전 센티널로 간다
         self.enemy_resolver: Any = None
+
+        # 니케의 실효 최대 장탄을 묻는 콜백 `(이름, t) → 발수` — 타임라인이 `CharState._full_ammo()`로 넣는다.
+        # `scaling: "max_ammo_count"`(「최종 최대 장탄 수 1발 당」)가 읽는다(`_scale_by_max_ammo`).
+        # 최대 장탄은 타임라인이 들고 있어 여기서 직접 셀 수 없다
+        self.max_ammo_provider: Any = None
+        # 위 콜백이 다시 `get_buffs`를 부르는 동안의 수령자 — 재귀 차단용(`_scale_by_max_ammo`)
+        self._ammo_query: set[str] = set()
 
         # 버프 활성/만료 이벤트 콜백. 타임라인이 register_buff_event_handler()로 주입
         # handler(kind, name, caster, target, t, expires_at)
@@ -854,6 +863,10 @@ class BuffManager:
             return "full_burst_start"
         if timing.startswith("full_burst_end_count:"):
             return "full_burst_end"
+        # `burst_enter_count:N:M` — 「버스트 N단계 돌입 시 [시작 횟수 별 효과]」. 이벤트는
+        # `burst_enter:N` 그대로이고 횟수 판정만 `_timing_match`가 한다 (네온 : 블루 오션 `워터 제트`)
+        if timing.startswith("burst_enter_count:"):
+            return "burst_enter:" + timing.split(":")[1]
         # 풀차지는 발사(`풀 차지 공격 시`)와 명중(`풀 차지 공격 명중 시`)이 별개 이벤트다.
         # `full_charge_count:N`은 분리 전 표기라 **발사**의 별칭으로 남긴다 — 데이터는
         # 전부 `full_charge_fire_count:N`으로 옮겼지만, 옛 표기가 들어와도 조용히
@@ -1592,6 +1605,8 @@ class BuffManager:
             stack_value (int): 넘은 배수 경계 (`every_stack:이름:N` timing용)
             heal_source (str): 회복을 **건** 캐릭터 (`event:heal_received` 전용,
                 `not_self_caused_heal` 조건용). 받는 쪽은 `caster` 인자다
+            dealt (float): 트리거한 탄이 준 대미지 (`full_charge_hit` 전용,
+                `dealt_fixed_damage`가 `notify_ctx()`로 읽는다)
 
         ctx는 `_notify_ctx`에 실어 `_condition_ok`가 읽는다. 발동 중 다시 notify가
         걸리는 경로가 있으므로(damage 핸들러 → named damage 명중 → notify) 반드시
@@ -1603,6 +1618,11 @@ class BuffManager:
             self._notify(event, t, caster)
         finally:
             self._notify_ctx = prev_ctx
+
+    def notify_ctx(self, key: str, default: Any = None) -> Any:
+        """지금 처리 중인 notify의 컨텍스트 값. 타임라인의 damage 핸들러가 **트리거한 히트**의
+        정보를 읽는 창구다 — `dealt`(그 탄이 준 대미지, `dealt_fixed_damage`)."""
+        return self._notify_ctx.get(key, default)
 
     def _notify(self, event: str, t: float, caster: str):
         self._cur_t = t
@@ -1859,6 +1879,15 @@ class BuffManager:
         if timing.startswith("burst_enter:") and event.startswith("burst_enter:"):
             return timing == event
 
+        # burst_enter_count:N:M — N단계 돌입이 M번째에 도달한 뒤 매번 (count >= M).
+        # `burst_cast_count:M`과 같은 규약이고, 카운터는 수신자별 `burst_enter:N` 누적이다 —
+        # 돌입은 스쿼드 판정이라 본인이 버스트를 안 쓴 사이클도 센다(GAMEPLAY §timing)
+        if timing.startswith("burst_enter_count:") and event.startswith("burst_enter:"):
+            _, stage, raw = timing.split(":")
+            if event != f"burst_enter:{stage}" or not raw.isdigit():
+                return False
+            return count >= int(raw)
+
         # squad_burst_cast:N
         if timing.startswith("squad_burst_cast:") and event.startswith("squad_burst_cast:"):
             return timing == event
@@ -2053,6 +2082,13 @@ class BuffManager:
                 # 남이 건 기절 면역도 참이어야 하므로 self_state:를 쓰지 않는다 (D `처단 3`).
                 if not self._has_immune(caster, "stun_immune"):
                     return False
+            elif cond == "self_undying":
+                # 「자신이 불굴 상태라면」 — 위와 같은 규약으로 **버프 이름이 아니라 stat**을 본다.
+                # 불굴은 이름이 아니라 상태라(나유타의 불굴은 이름이 `부동심`) `self_state:`로는 못 잡고,
+                # 남이 건 불굴(블랑 `쇼타임 2`)도 참이어야 한다. 보스 공격이 불굴을 보는 창구와 같다
+                # (마키마 `조용히 해주겠니? 3`).
+                if not self.has_live_stat(caster, "undying", t):
+                    return False
             elif cond.startswith("self_hp_above:"):
                 n = float(cond.split(":")[1])
                 hp_pct = self.state.get("hp_pct", {}).get(caster, 100.0)
@@ -2077,6 +2113,14 @@ class BuffManager:
                 # 「자신의 엄폐물이 파괴된 상태라면」 — 위의 부정. 엄폐물은 보스 공격
                 # 패턴에만 부서지므로 기본 경로에서는 늘 거짓이다 (베이 애장품 2·3단계).
                 if self.cover_alive(caster):
+                    return False
+            elif cond == "no_broken_cover_ally":
+                # 「엄폐물이 파괴된 아군이 없다면」 — 시전자 포함 산 아군 전원의 엄폐물이 살아 있어야 참.
+                # 같은 스킬 앞 clause의 대상 `allies_broken_cover_random:N`(시전자를 빼지 않는다)의
+                # 후보가 0기인 것과 정확히 같은 판정이라 두 clause가 배타 분기가 된다. 발동 시점
+                # 판정이다(`[10초 유지]` 버프의 게이트). 엄폐물은 보스 공격 패턴에만 부서지므로
+                # 기본 경로에서는 늘 참이다 (릴리 `최고의 엔지니어! 3`).
+                if any(not self.cover_alive(x) for x in self._alive()):
                     return False
             elif cond.startswith("ally_hp_below:"):
                 # 발동 시점에는 target이 아직 resolve되기 전이라 개별 대상을 볼 수 없다.
@@ -2190,6 +2234,13 @@ class BuffManager:
                     0,
                 )
                 if current < threshold:
+                    return False
+            elif cond.startswith("target_stack_above:"):
+                # 「대상이 [스택명] 최대 중첩 상태라면」 — `self_stack_above:`의 대상(적)판.
+                # 존재만 보는 `target_state:`와 같은 창구 규약(어느 적에게든 — 쫄몹이 없으면 보스)에
+                # 중첩 수 비교를 얹는다. 발동 시점 1회 판정이다 (프림 `일어남` 애장품 1단계)
+                stack_name, _, threshold = cond[len("target_stack_above:"):].rpartition(":")
+                if self._target_stack(stack_name) < int(threshold):
                     return False
             elif cond.startswith("self_stat_above:"):
                 # "자신이 [stat] 증가 상태라면" — 버프 *이름*이 아니라 **stat 값**으로 판정한다.
@@ -2370,6 +2421,15 @@ class BuffManager:
         """
         return any(
             any(_is_enemy(x) for x in (ab.target_chars or [])) for ab in self._by_name(state_name)
+        )
+
+    def _target_stack(self, state_name: str) -> int:
+        """`target_stack_above:`의 판정값 — 적에게 걸린 그 이름 효과의 중첩 수(여럿이면 최대).
+        `_has_target_state()`와 같은 근사로 어느 적에게든 붙어 있으면 센다."""
+        return max(
+            (ab.stack for ab in self._by_name(state_name)
+             if any(_is_enemy(x) for x in (ab.target_chars or []))),
+            default=0,
         )
 
     def enemy_has_state(self, enemy_id: str, state_name: str) -> bool:
@@ -3292,6 +3352,78 @@ class BuffManager:
             duration = float(duration) * (n if n is not None else 0)
         return math.inf if duration is None or duration == -1 else t + duration
 
+    def _apply_buff_max_stack_add(self, eff: dict, caster: str, t: float) -> None:
+        """「중첩 가능 이로운 효과 중첩량 N개 ▲」 — 대상 아군에게 걸린 **스택형 이로운 효과**의
+        현재 중첩을 N 올린다(IMPL-STATUS `buff_max_stack_add`).
+
+        - 상한(`max_stack`)은 그대로이고 넘기지 못한다 — 이미 최대 중첩인 버프는 no-op(유저 확인
+          2026-09-21). 누가 건 버프든 가리지 않고, 해로운 효과·`max_stack` 1짜리는 건드리지 않는다.
+        - 중첩이 실제로 오르면 지속시간도 갱신하고(`buff_stack_add`와 같은 일반 규칙 —
+          GAMEPLAY §버프 스택) `stack_reach` 이벤트를 낸다.
+        - `stack_change_immune`인 수령자는 뺀다.
+        - **한 ActiveBuff가 수령자와 비수령자를 함께 대상으로 잡고 있으면 건너뛴다.** 중첩은
+          ActiveBuff 하나에 공유되므로 올리면 비수령자까지 오른다. 코드 한정 공급원(`allies_code:`)이
+          아군 전체 스택 버프를 만날 때만 생기는 근사다(`partial_skips`로 센다).
+        """
+        char = self._char.get(caster, {})
+        if "fixed_value" in eff:
+            n = int(eff["fixed_value"])
+        else:
+            vals = eff.get("values") or {}
+            n = int(float(vals.get(_get_skill_lv(char, eff), vals.get("10", 1))))
+        recipients = {
+            c for c in (self._resolve_target(eff.get("target", "self"), caster) or [])
+            if not _is_enemy(c) and not self._has_immune(c, "stack_change_immune")
+        }
+        if not recipients or n <= 0:
+            return
+        if self._instant_event_handler and eff.get("name"):
+            for tgt in recipients:
+                self._instant_event_handler(eff["name"], caster, tgt, t, "buff_max_stack_add", float(n))
+        reached: list[tuple[str, int, str]] = []
+        for ab in self._active:
+            e = ab.effect
+            if e.get("type") != "buff" or not str(e.get("polarity", "")).startswith("beneficial"):
+                continue
+            max_s = e.get("max_stack", 1)
+            if max_s == 1:
+                continue
+            tgts = ab.target_chars
+            if tgts is None:
+                tgts = self._resolve_target(e.get("target", "self"), ab.caster) or []
+            hit = [c for c in tgts if c in recipients]
+            if not hit:
+                continue
+            if any(c not in recipients for c in tgts):
+                self.partial_skips += 1
+                continue
+            cap = max_s if max_s != -1 else ab.stack + n
+            prev = ab.stack
+            ab.stack = min(ab.stack + n, cap)
+            if ab.per_char_stacks:
+                ab.per_char_stacks = {
+                    c: (min(v + n, max_s) if max_s != -1 else v + n)
+                    for c, v in ab.per_char_stacks.items()
+                }
+            if ab.stack == prev:
+                continue
+            self._invalidate_buffs_cache()
+            duration = e.get("duration")
+            if ab.expires_at != math.inf and duration is not None and duration > 0:
+                ab.activated_at = t
+                ab.expires_at = t + duration
+            if e.get("name"):
+                reached.append((e["name"], ab.stack, ab.caster))
+                if self._buff_event_handler:
+                    new_val = self._get_value(e, ab)
+                    for tgt in hit:
+                        self._buff_event_handler(
+                            "activate", e["name"], ab.caster, tgt,
+                            t, ab.expires_at, new_val, e.get("stat"),
+                        )
+        for name, stack, ab_caster in reached:
+            self.notify(f"stack_reach:{name}:{stack}", t, ab_caster)
+
     def _activate(self, eff: dict, caster: str, t: float, suppress_event: bool = False,
                   targets: list[str] | None = None):
         """효과를 ActiveBuff로 변환해 활성 목록에 추가하거나 갱신.
@@ -3325,6 +3457,12 @@ class BuffManager:
             self._dispatch_instant(eff, caster, t)
             return
 
+        # 「중첩 가능 이로운 효과 중첩량 N개 ▲」는 buff로 파싱돼 있지만(원문에 유지 블록이 없어
+        # `duration: -1`) **즉발**이다 — 담체를 남기지 않고 그 자리에서 중첩만 올린다
+        if eff.get("stat") == "buff_max_stack_add":
+            self._apply_buff_max_stack_add(eff, caster, t)
+            return
+
         if eff.get("type") == "damage":
             tick_interval = eff.get("tick_interval")
             if tick_interval and self._damage_handler:
@@ -3336,6 +3474,33 @@ class BuffManager:
                 # 회수는 양쪽 같다. 경계 처리는 tick()의 `limit` 참조.
                 duration = eff.get("duration")
                 expires = math.inf if duration is None or duration == -1 else t + duration
+                max_stack = eff.get("max_stack", 1)
+                # **중첩 없는 지속 대미지는 이름이 곧 인스턴스다** (GAMEPLAY §버프 스택 — `[N 중첩]` 없는
+                # DoT는 재부여 시 병존하지 않고 갱신된다). 인스턴스 키는 효과 객체라, 같은 상태를 두 경로로
+                # 부여하는 효과(쿠루미 `해킹` — 36명중 · 버스트, 하란 `바이러스 전이`)는 이게 없으면 한 적에게
+                # 따로 겹쳐 틱이 두 번 들어갔다(유저 지시 2026-09-24 — 틱 복사는 잘못이다). 같은 시전자의
+                # 같은 이름 DoT가 이미 돌고 있으면 그 인스턴스를 갱신하고, 이번 부여의 대상은 그 인스턴스에
+                # 합친다(쫄몹이 있을 때만 갈린다). 주기 자동공격(`auto_damage`·소환체 `damage:N`)은 같은
+                # 분기를 타지만 지속 대미지가 아니라 걸지 않는다.
+                if eff.get("stat") == "dot_damage" and max_stack == 1 and eff.get("name"):
+                    running = next((
+                        ab for ab in self._active
+                        if ab.caster == caster and ab.effect is not eff
+                        and ab.effect.get("name") == eff["name"]
+                        and ab.effect.get("stat") == "dot_damage"
+                        and ab.effect.get("max_stack", 1) == 1
+                        and id(ab.effect) in self._dot_timers
+                    ), None)
+                    if running is not None:
+                        own_raw = eff.get("target", "self")
+                        if (running.target_chars is not None and isinstance(own_raw, str)
+                                and not own_raw.startswith(_LAZY_RESOLVE_PREFIXES)):
+                            for tgt in self._resolve_target(own_raw, caster):
+                                if tgt not in running.target_chars:
+                                    running.target_chars.append(tgt)
+                        eff = running.effect
+                # 재부여는 틱 위상을 새로 잡는다 — 다음 틱이 「재부여 +interval」이다(질 `산성탄 2`
+                # 유저 확인 Q6 — 재장전마다 위상이 리셋돼 틱이 밀리는 동작이 맞다).
                 first_t = t if eff.get("tick_start") == "immediate" else t + tick_interval
                 self._dot_timers[id(eff)] = (caster, first_t, expires)
                 # DoT는 _active에도 등록해야 target_state/debuff_cleanse/remove_named_buff
@@ -3343,7 +3508,6 @@ class BuffManager:
                 raw_target = eff.get("target", "self")
                 lazy = isinstance(raw_target, str) and raw_target.startswith(_LAZY_RESOLVE_PREFIXES)
                 targets = None if lazy else self._resolve_target(raw_target, caster)
-                max_stack = eff.get("max_stack", 1)
                 existing = next(
                     (ab for ab in self._active if ab.effect is eff and ab.caster == caster), None
                 )
@@ -4292,6 +4456,8 @@ class BuffManager:
 
             char_stack = ab.per_char_stacks.get(caster) if ab.per_char_stacks else None
             val = self._get_value(eff, ab, actual_recipient, stack_override=char_stack)
+            if val is not None and eff.get("scaling") == "max_ammo_count":
+                val = self._scale_by_max_ammo(val, actual_recipient, t)
             if val is None:
                 continue
             if buff_key == "enemy_def_down_flat":
@@ -4678,6 +4844,25 @@ class BuffManager:
             return base
 
         return base * eff_stack if eff.get("max_stack", 1) != 1 else base
+
+    def _scale_by_max_ammo(self, val: float, recipient: str, t: float) -> float | None:
+        """`scaling: "max_ammo_count"` — 원문 「**최종** 최대 장탄 수 1발 당」. 값에 수령자의 실효 최대 장탄을
+        곱한다(오버로드·큐브·소장품·스킬 버프·반올림을 다 거친 `CharState._full_ammo()`). **조회 시점에 읽는다**
+        — 1발 유지 버프면 부여한 발이 아니라 받는 발을 쏘는 순간의 장탄이다(에밀리아 `미정령의 축복 2`).
+
+        최대 장탄 계산이 다시 `get_buffs`를 부르므로 그 안쪽 조회에서는 None(= 이 버프를 건너뜀)을 돌려준다.
+        최대 장탄은 차지 대미지 같은 이 부류의 stat을 읽지 않아 결과가 같다. 안쪽 결과가 `_buffs_cache`에
+        먼저 들어가도 같은 키로 바깥 조회가 끝나며 덮어쓴다."""
+        if self.max_ammo_provider is None or recipient in self._ammo_query:
+            return None
+        self._ammo_query.add(recipient)
+        try:
+            n = self.max_ammo_provider(recipient, t)
+        finally:
+            self._ammo_query.discard(recipient)
+        if n is None:
+            return None
+        return val * n
 
     # ── 타겟 resolve ──────────────────────────────────────────────────────
 
@@ -5214,6 +5399,7 @@ class BuffManager:
         self._accum_last.clear()
         self._lazy_target_cache.clear()
         self._event_counts.clear()
+        self.partial_skips = 0
         self._down_lost.clear()
         self._trigger_counts.clear()
         self._buffs_cache.clear()

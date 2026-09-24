@@ -2274,8 +2274,11 @@ class CharState:
         for bullet_core in _bullet_core_fracs(core_fracs, self.muzzles):
             bm.notify("hit_count", t, self.name, core_frac=bullet_core)
         if is_full:
+            # 「자신이 가한 피해량의 N%」(`dealt_fixed_damage`)가 읽는 **그 탄**의 대미지 — 이미 방어력·버프·
+            # 크리·코어가 적용된 값이다. 명중이 탄 단위라 이 발의 히트 합을 총구 수로 나눈다
+            dealt = sum(ev.damage for ev in events) / self.muzzles
             for _ in range(self.muzzles):
-                bm.notify("full_charge_hit", t, self.name)
+                bm.notify("full_charge_hit", t, self.name, dealt=dealt)
         # 일반 공격 명중이면 충전 창·풀차지·피격 대상 종류와 무관하게 시전자 기준값을
         # 갱신한다. weapon_change 스킬 대미지는 일반 공격이 아니므로 제외한다.
         if not self._wc_is_skill_damage():
@@ -2455,21 +2458,26 @@ class CharState:
         wc_reload_time = wc_eff.get("reload_time", self.weapon.get("reload_time", 1.5))
         wc_core_dmg_mult = wc_eff.get("core_dmg_mult", self.weapon.get("core_dmg_mult", 200.0))
 
-        # 변경 무기의 발사 메카닉. CDN에 변경 무기 레코드가 없어 캐릭터별 계층이 비므로
-        # 수동 실측(weapon_delays `_weapon_change`) → 스킬 텍스트에 명시된 값(wc_eff)
-        # → 변경 무기군 기본값 순으로 떨어진다.
+        # 변경 무기의 발사 메카닉. 수동 실측(weapon_delays `_weapon_change`) → 스킬 텍스트에
+        # 명시된 값(wc_eff) → CDN(wc_cdn) → 변경 무기군 기본값 순으로 떨어진다.
         wc_over = _DELAYS.get("_weapon_change", {}).get(self.name, {}).get(wc_eff.get("name", ""), {})
+        # CDN은 변경 무기의 자기 레코드를 주지 않고 **연사만** 스킬 값 칸에 준다
+        # (parse_nikke `weapon_change_fire_rate` — 효과의 `source` 슬롯으로 찾는다).
+        # 값이 하나뿐이라 예열 곡선이 아니라 고정 연사로 읽어 하한·상한에 같이 둔다 — 벨벳 MG
+        # 실측이 게이지 100% 고정이다. 연사 모드(auto)는 상한을 읽지 않는다.
+        wc_cdn_rate = (self.weapon.get("weapon_change_fire_rate") or {}).get(wc_eff.get("source", ""))
+        wc_cdn = {"fire_rate": wc_cdn_rate, "fire_rate_max": wc_cdn_rate} if wc_cdn_rate else None
         # **딜레이 두 키도 같은 3계층을 탄다.** 종전에는 이 둘만 `wc_over`보다 위에서
         # 계산돼 실측층을 건너뛰었다 — `_weapon_change`에 적어도 조용히 무시됐다는 뜻이다
         # (weapon_delays.json `_comment`가 선언한 우선순위와 어긋났다).
         wc_post_fire_delay = _pick("post_fire_delay", wc_over, wc_eff, wc_mech, default=0.0)
-        wc_fire_rate = float(_pick("fire_rate", wc_over, wc_eff, wc_mech,
+        wc_fire_rate = float(_pick("fire_rate", wc_over, wc_eff, wc_cdn, wc_mech,
                                    default=wc_mech.get("fire_rate_min", 1.0)))
-        wc_fire_rate_max = _pick("fire_rate_max", wc_over, wc_eff, wc_mech)
+        wc_fire_rate_max = _pick("fire_rate_max", wc_over, wc_eff, wc_cdn, wc_mech)
         wc_warmup_bullets = float(_pick("warmup_bullets", wc_over, wc_eff, wc_mech, default=1.0))
         wc_pellets = int(_pick("pellets", wc_over, wc_eff, wc_mech, default=1))
         wc_muzzles = int(_pick("muzzles", wc_over, wc_eff, default=1))
-        # 변경 무기는 CDN 레코드가 없어 ②층이 비고 무기군 기본값으로 떨어진다
+        # 변경 무기의 버스트 게이지는 CDN에 없어(연사만 있다) 무기군 기본값으로 떨어진다
         # (weapon_mechanics.json weapon_type_defaults.burst_energy).
         wc_burst_energy = float(_pick("burst_energy", wc_over, wc_eff, wc_mech, default=0.0))
 
@@ -2520,7 +2528,8 @@ class CharState:
         self.post_fire_delay     = wc_post_fire_delay
         self.cover_during_delay  = _pick("cover_during_delay", wc_over, wc_eff,
                                          default=self.cover_during_delay)
-        # 변경 무기는 CDN에 레코드 자체가 없다 — 원래 무기의 주기 하한을 물려주지 않는다.
+        # 주기 하한은 `DOWN_Charge`에만 거는데 변경 무기의 발사 입력은 CDN에 없다 — 원래 무기의
+        # 하한을 물려주지 않는다.
         self._min_fire_cycle     = 0.0
 
         # 실효 최대 장탄. 스킬 텍스트에 `(사용 무기 변경 시 최대 장탄 수 효과 갱신)`이 있는
@@ -4187,7 +4196,7 @@ def _register_instant_handlers(bm, char_states: dict[str, "CharState"], burst_ct
 def _check_names(names: list[str], allow_unparsed: bool) -> None:
     """스쿼드 이름을 정본 JSON 두 곳과 대조한다.
 
-    별칭(`마스트`)이나 부제 없는 원본은 `parsed_nikke.json`에는 있고
+    스크랩만 되고 아직 파싱하지 않은 캐릭터(출시 직후 신캐)는 `parsed_nikke.json`에는 있고
     `parsed_skills.json`에는 없다. 효과 조회가 `.get(name, [])`이라 그대로 두면
     스탯·무기만 정상이고 스킬이 0개인 니케로 조용히 돌아가 — 에러 없이 그럴듯한
     오답이 나온다. 여기서 끊는다 (docs/ALIASES.md).
@@ -4598,6 +4607,9 @@ def simulate(
                     f"정식 명칭을 쓴다. docs/CONTROL.md §런타임 게이트")
 
     bm = BuffManager(squad, state)
+    # `scaling: "max_ammo_count"`(「최종 최대 장탄 수 1발 당」)가 수령자의 실효 최대 장탄을 읽는 창구
+    bm.max_ammo_provider = (lambda name, t: char_states[name]._full_ammo(bm, t)
+                            if name in char_states else None)
     burst_ctrl = BurstController(squad, cfg, char_states, enm)
     _register_instant_handlers(bm, char_states, burst_ctrl)
 
@@ -4704,6 +4716,26 @@ def simulate(
                 t=t, caster=caster, damage=int(amount), is_crit=False,
                 hit_tag="accum_split_damage", skill_name=eff.get("name", ref),
                 rule=_rule if isinstance(_rule, str) else "", split=True,
+            ))
+            return
+
+        # 「자신이 가한 피해량의 N% 만큼 고정 대미지」 — 계수가 공격력이 아니라 **트리거한 탄이 준 대미지**다
+        # (`full_charge_hit`이 notify에 싣는 `dealt`). 이미 방어력·버프·크리·코어가 적용된 값이라 위 방출과
+        # 같은 이유로 DealForm을 다시 타지 않는다 — 고정 대미지라 어떤 층도 얹지 않는다.
+        # 자신은 명중 트리거(`hit_count:[이름]`)도 버스트 게이지도 내지 않는다. (에밀리아 `대정령의 철퇴`)
+        if eff.get("stat", "") == "dealt_fixed_damage":
+            dealt = float(bm.notify_ctx("dealt", 0.0) or 0.0)
+            vals = eff.get("values")
+            pct = (float(vals.get(_get_skill_lv(cs.char, eff), vals.get("10", 0.0))) if vals
+                   else float(eff.get("fixed_value", 0.0)))
+            amount = dealt * pct / 100.0
+            if amount <= 0.0:
+                return
+            _rule = eff.get("target", "")
+            _dot_events.append(HitEvent(
+                t=t, caster=caster, damage=int(amount), is_crit=False,
+                hit_tag="dealt_fixed_damage", skill_name=eff.get("name", "dealt_fixed_damage"),
+                rule=_rule if isinstance(_rule, str) else "",
             ))
             return
 
@@ -5175,6 +5207,15 @@ def simulate(
         if (to_hp and state["hp"][name] - to_hp <= 0.0
                 and bm.has_live_stat(name, "undying", t)):
             to_hp = max(state["hp"][name] - 1.0, 0.0)
+        # 「전투불능에 이르는 공격에 피격 시」(`event:lethal_hit`) — 무적·불굴에 막히지 않은 치명 발을
+        # **받기 전에** 알린다. 거기서 켜진 불굴이 **이 발**을 받아야 트리거가 뜻을 가지므로 불굴을 한 번
+        # 더 본다(마키마 `발각된 모양이네`). 이미 불굴이면 위에서 체력 1로 깎여 치명이 아니라 나가지 않는다.
+        # 쓰러진 **뒤**의 `event:self_down`과 다른 축이다. 균등 분배로 나눠 받은 몫에도 나간다 — 피격
+        # 이벤트는 맞은 니케만 받지만 치명 판정은 체력 층의 일이다(⬜ 인게임 미확인, docs/DATA_VERIFY.md).
+        if to_hp and state["hp"][name] - to_hp <= 0.0:
+            bm.notify("event:lethal_hit", t, name)
+            if bm.has_live_stat(name, "undying", t):
+                to_hp = max(state["hp"][name] - 1.0, 0.0)
         # **체력이 0에 닿은 발은 곧바로 전투불능이다.** 임계 이벤트(`hp_below:T`)를 쏘지 않는다 —
         # 쏘면 「체력 20% 이하 도달 시 최대 체력 ▲」(목단 `근성`)가 이미 0이 된 체력을 되살린다
         # (유저 확인 2026-09-15 — 인게임도 그냥 쓰러진다).
