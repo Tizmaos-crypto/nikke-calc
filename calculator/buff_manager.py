@@ -3499,9 +3499,19 @@ class BuffManager:
                                 if tgt not in running.target_chars:
                                     running.target_chars.append(tgt)
                         eff = running.effect
-                # 재부여는 틱 위상을 새로 잡는다 — 다음 틱이 「재부여 +interval」이다(질 `산성탄 2`
-                # 유저 확인 Q6 — 재장전마다 위상이 리셋돼 틱이 밀리는 동작이 맞다).
-                first_t = t if eff.get("tick_start") == "immediate" else t + tick_interval
+                # **돌고 있는 지속 대미지를 다시 걸면 틱 박자는 그대로 잇고 만료만 갱신한다**
+                # (유저 결정 2026-09-24 — 인게임은 재부여와 무관하게 초당 1틱씩 들어간다). 종전에는
+                # 재부여마다 다음 틱을 「재부여 +interval」로 새로 잡아, 질 `산성탄 2`(재장전마다) ·
+                # 쿠루미 `해킹`(36명중마다) · 레이븐 `쇼크웨이브`(풀차지마다 중첩 추가)처럼 박자보다
+                # 촘촘히 다시 걸리는 DoT는 틱 간격이 벌어져 틱을 잃었다. 중첩 추가도 같은 재부여다.
+                # 첫 부여(만료 뒤 다시 거는 것 포함)의 첫 틱 위상은 종전대로
+                # type 1/2다(질 Q6 — type 2). 주기 자동공격(`auto_damage` 등)은 지속 대미지가
+                # 아니라 종전대로 새로 잡는다.
+                running_timer = self._dot_timers.get(id(eff))
+                if eff.get("stat") == "dot_damage" and running_timer is not None:
+                    first_t = running_timer[1]
+                else:
+                    first_t = t if eff.get("tick_start") == "immediate" else t + tick_interval
                 self._dot_timers[id(eff)] = (caster, first_t, expires)
                 # DoT는 _active에도 등록해야 target_state/debuff_cleanse/remove_named_buff
                 # 등이 name·polarity 기준으로 조회할 수 있다.
@@ -3639,6 +3649,35 @@ class BuffManager:
             if ab.effect is eff and ab.caster == caster:
                 if lazy or use_per_target or ab.target_chars == targets:
                     existing = ab
+                    break
+
+        # **같은 이름의 버프는 한 상태다** (GAMEPLAY §버프 스택). 위 탐색의 키는 효과 객체라, 같은 상태를
+        # 두 경로로 거는 효과는 이게 없으면 한 대상에게 따로 겹쳐 값이 두 배가 됐다 — 레이븐 `급소 공략`
+        # (전투 시작 · 풀버스트 시작, 5초)이 첫 풀버스트 3.25~5.02초에 42.24%였다. 위 지속 대미지 분기
+        # (쿠루미 `해킹`)와 같은 규칙의 버프판이다. 같은 시전자가 같은 이름·같은 stat을 **같은 대상에게**
+        # 다시 걸면 살아 있는 인스턴스를 재발동과 똑같이 갱신한다(중첩형이면 중첩이 하나 오른다). 값은
+        # 먼저 건 항목의 것을 쓰므로 항목끼리 값이 같아야 한다(`runner/doclint.py` 검사 M).
+        # 대상이 다르면 따로 둔다(바니 모드 — 자신 · 짝). 조건을 런타임에 재평가하는 버프와 조건부 유한
+        # passive는 조건이 곧 유효 구간이라 항목마다 따로 둔다 — 합치면 한쪽 조건이 다른 쪽을 켜고 끈다.
+        # 발수 수명(`duration_bullets`)은 대상별 카운터라 합치지 않는다. 보스가 건 효과는 패턴이 닫힐 때
+        # 그 패턴 것만 풀려야 해서(`release_boss_effects`) 합치지 않는다.
+        if (existing is None and name and duration_bullets == -1 and not _is_enemy(caster)
+                and not _has_runtime_cond(eff["trigger"].get("condition", []), expires)
+                and not _is_cond_finite_passive(eff)):
+            stat_key = eff.get("stat")
+            for ab in self._active:
+                other = ab.effect
+                if (ab.caster == caster and other is not eff and t < ab.expires_at
+                        and other.get("type") == "buff" and other.get("name") == name
+                        and other.get("stat") == stat_key
+                        and other.get("max_stack", 1) == max_stack
+                        and other.get("duration_bullets", -1) == -1
+                        and not ab.has_runtime_conditions
+                        and not _is_cond_finite_passive(other)
+                        and (other.get("target", "self") == raw_target if lazy
+                             else ab.target_chars == targets)):
+                    existing = ab
+                    eff = other
                     break
 
         if existing:
