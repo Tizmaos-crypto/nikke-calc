@@ -248,7 +248,9 @@ for t in 0, DT, 2·DT, ..., duration:
 `parsed_nikke` `optimal_range`, 적정 최대·최소 사거리 ▲ 반영)과 거리를 비교한다. 판정 자리 셋 — 평타 ③ +30%
 (`_fire`·`_charge_fire`, 풀차지 트리거 뒤의 이 발 버프로)·스킬의 일반 공격 판정·조건 `optimal_range` — 이 모두 같은
 함수를 본다. 거리가 없으면 종전 목록이라 기본 경로가 안 흔들린다. 거리와 목록을 같이 적으면(적 기본값·move 패턴
-어디서든) 즉시 실패한다.
+어디서든) 즉시 실패한다. 목록은 **적정거리가 있는 무기군**(`buff_manager.RANGE_WEAPON_TYPES` — CDN 대표 구간의 최대가
+0보다 큰 무기군)만 받는다 — RL(0~0)이나 모르는 이름을 적으면 즉시 실패한다. 받아 주면 게임에 없는 ③ +30%가 조용히
+붙는다(2026-09-28, Moris-kr 포크 a374f7a).
 
 #### 보스 공격 (`attack` 패턴 → `timeline._boss_attack`)
 
@@ -385,7 +387,7 @@ cs.tick(t)
 | 컨트롤 | 필드 | 동작 위치 |
 |---|---|---|
 | 톡톡이 | `_click_sched`(mode `tap`) / `_tap_hold` / `_tap_charge` / `_tap_release` / `_tap_post` | 누름 래치 `_click_entry()` · 실행 `_tick_charge()`의 charging 분기 |
-| 장전컨 | `reload_policy` / `reload_lead` / `reload_margin` / `reload_cover_dur` | `_apply_reload_cover()` |
+| 장전컨 | `reload_when`(앵커 한 줄 — 정책 이름은 `_RELOAD_POLICIES`가 여기로 desugar) / `reload_if_dry` / `reload_priority` / `reload_cover_dur` | `_apply_reload_cover()` |
 | 버스트 엄폐컨 | `cover_policy` / `cover_extend` | `_apply_burst_cover()` |
 | 홀드 | `_click_sched`(mode `hold`·`hold_judge`) / `_charge_full_t` / `_hold_release_t` | 생산자 `_apply_click_schedule()` · 실행 `_tick_charge()`의 charging 분기 |
 
@@ -517,8 +519,10 @@ get_buffs(caster, target, t)
 ```
 
 계획 캐시·`_by_stat`/`_by_name` 인덱스는 전부 **`_active`가 그대로인 동안** 유효한 파생물이라
-`_invalidate_buffs_cache()`가 한꺼번에 비운다. 전제가 깨졌는지 확인하는 감사 모드는
-`HARNESS.md §버프 집계 캐시 감사`.
+`_invalidate_buffs_cache()`가 한꺼번에 비운다. 같은 프레임의 조회 결과(`_buffs_cache`)는 키에
+값 번호(`_value_version`)가 하나 더 붙는다 — `_active`의 구성은 그대로인데 결과가 달라지는 일(재발동의
+중첩·만료 갱신, 중첩 증감, 게이지 변화)이 생기면 `_bump_value_version()`이 번호를 올려 그 뒤 조회가
+다시 센다. 전제가 깨졌는지 확인하는 감사 모드는 `HARNESS.md §버프 집계 캐시 감사`.
 
 `_resolve_lazy()`는 `get_buffs`·`consume_bullet_buffs`·`_live()`(보스 공격이 무적·불굴·도발 등
 니케 상태를 묻는 창구 — get_buffs가 읽지 않는 값 없는 stat도 여기서 대상이 정해진다)가 **같이 쓴다.** 지연 resolve

@@ -71,6 +71,12 @@ def _type_optimal_ranges() -> dict[str, tuple[float, float]]:
 
 _TYPE_OPTIMAL_RANGE = _type_optimal_ranges()
 
+# 적정거리가 있는 무기군 — 대표 적정 구간의 최대가 0보다 큰 것. RL은 CDN 값이 0~0이라 빠진다.
+# 무기군 목록(`optimal_range_weapons` · `move.weapons`)은 이 안에서만 받는다 — RL을 받으면 게임에 없는
+# ③ +30%가 조용히 붙는다(Moris-kr 포크 `moris/master` a374f7a가 먼저 막았다).
+RANGE_WEAPON_TYPES: frozenset[str] = frozenset(
+    w for w, (_lo, hi) in _TYPE_OPTIMAL_RANGE.items() if hi > 0)
+
 
 def optimal_range_of(name: str, weapon_type: str) -> tuple[float, float]:
     """이 니케가 지금 무기로 쏠 때의 기본 적정거리 [최소, 최대] — CDN `bonusrange_*`(`parsed_nikke` `optimal_range`).
@@ -408,11 +414,13 @@ _BOOL_BUFF_KEYS = frozenset([
 # get_buffs 실행 계획의 스텝 종류 (`BuffManager._build_plan` 참고)
 _PLAN_ADD, _PLAN_CRIT, _PLAN_FLAG, _PLAN_LIVE, _PLAN_QUANT, _PLAN_CDMG = 0, 1, 2, 3, 4, 5
 
-# 계획 캐시 감사 모드. `NIKKE_BUFF_AUDIT=1`이면 매 조회마다 계획을 다시 만들어 캐시와
-# 대조하고, 다르면 즉시 예외를 던진다 (조용히 틀리는 대신 터진다).
+# 버프 집계 캐시 감사 모드. `NIKKE_BUFF_AUDIT=1`이면 매 조회마다 계획을 다시 만들어 캐시와
+# 대조하고, 캐시에서 꺼낸 결과도 그 자리에서 다시 센 결과와 맞춰 봐서 다르면 즉시 예외를
+# 던진다 (조용히 틀리는 대신 터진다).
 #
-# 계획 캐시의 전제는 **`_active`가 바뀌면 반드시 `_invalidate_buffs_cache()`를 거친다**는
-# 것 하나다. 지금 코드의 모든 `_active` 변경 지점이 이를 지키지만, 앞으로 추가될 효과가
+# 캐시는 번호 둘로 산다. `_cache_version`은 **`_active`가 바뀔 때** `_invalidate_buffs_cache()`가
+# 올리고(계획 캐시도 함께 버린다), `_value_version`은 **`_active`는 그대로인데 조회 결과가 달라질 때**
+# `_bump_value_version()`이 올린다. 지금 코드의 변경 지점이 이를 지키지만, 앞으로 추가될 효과가
 # 이 전제를 깰 수 있다. 새 캐릭터를 넣고 결과가 의심스러우면 이 모드로 회귀를 돌린다:
 #
 #     NIKKE_BUFF_AUDIT=1 python -m runner.snapshot --squad <스쿼드>
@@ -575,6 +583,21 @@ _TICK_EPS = 1e-6
 # 만료 시각에 떨어지는 마지막 틱을 "살짝 당겨" 계산할 때 쓰는 폭.
 # `get_buffs()`의 `t >= expires_at` 컷을 피할 만큼 크고, 1프레임보다는 훨씬 작다.
 _TICK_NUDGE = 1e-4
+
+
+def _feather_interval(base: float, step_pct: float, n: int) -> float:
+    """니어 페더 공격 주기 — 한 기가 늘 때마다 기본 주기의 `step_pct`%씩 깎는다(**합연산**).
+
+    n기면 `base × (1 − step_pct/100 × (n−1))`. 정본은 `docs/scenarios/아인.md §니어 페더 메커니즘`
+    (2026-09-28 곱연산 `base × 0.84^(n−1)`에서 전환). 깎인 값이 0 이하면 매 프레임 발사가 되므로
+    데이터가 틀린 것으로 보고 끊는다.
+    """
+    left = 1.0 - step_pct / 100.0 * (n - 1)
+    if left <= 0.0:
+        raise ValueError(
+            f"니어 페더 공격 주기가 0 이하다(기본 {base}초, {n}기, 한 기당 −{step_pct}%) — "
+            f"feather_interval_step_pct나 슬롯 수를 확인한다")
+    return base * left
 
 
 # ── ActiveBuff ────────────────────────────────────────────────────────────
@@ -749,9 +772,11 @@ class BuffManager:
         # handler(kind, name, caster, target, t, expires_at)
         self._buff_event_handler: Any = None
 
-        # get_buffs 캐시: (caster, t, _cache_version) → buffs dict
+        # get_buffs 캐시: (caster, target, t, _cache_version, _value_version, exclude_names) → buffs dict
         self._buffs_cache: dict = {}
         self._cache_version: int = 0
+        # 값 번호 — `_active` 구성은 그대로인데 조회 결과가 달라지는 사건마다 오른다(`_bump_value_version`)
+        self._value_version: int = 0
 
         # get_buffs 실행 계획 캐시: (caster, target, exclude_names) → (plan, hp_abs, cb_abs)
         # `_active`가 그대로인 동안(= 같은 _cache_version) 기여가 변하지 않는 버프를
@@ -1201,13 +1226,14 @@ class BuffManager:
             if not fid or not slots:
                 return
             base = float(eff.get("feather_interval_base", 8.0))
-            mult = float(eff.get("feather_interval_mult", 1.0))
+            step = float(eff.get("feather_interval_step_pct", 0.0))
             st = self.state.setdefault("feathers", {}).setdefault(caster, {})
             st[fid] = {
                 "expiry": [math.inf if float(d) < 0 else t + float(d) for d in slots],
-                "next_t": t + base * mult ** (len(slots) - 1),
+                # 슬롯이 전부 살아 있을 때가 가장 짧다 — 여기서 0 이하 검사까지 끝난다
+                "next_t": t + _feather_interval(base, step, len(slots)),
                 "base": base,
-                "mult": mult,
+                "step": step,
             }
             return
 
@@ -1363,6 +1389,7 @@ class BuffManager:
                 else:
                     # 중첩 가능 해로운 효과 범용 감소: 완전 제거 불가, 최소 1스택 유지
                     ab.stack = max(1, min(ab.stack + delta, cap))
+                self._bump_value_version()
                 # 스택 변화를 buff_event_handler에 알려 UI 타임라인 갱신
                 if self._buff_event_handler and ab.effect.get("name"):
                     new_val = self._get_value(ab.effect, ab)
@@ -1491,6 +1518,7 @@ class BuffManager:
                 if caster not in (ab.target_chars or []):
                     continue
                 ab.stack = max(0, ab.stack - reduce)
+                self._bump_value_version()
                 if ab.stack <= 0:
                     to_remove.append(ab.uid)
             if to_remove:
@@ -1524,6 +1552,10 @@ class BuffManager:
                 )
                 cap = base_cap + add_cap
                 gauges[gauge_id] = min(new_val, cap)
+                # `gauge_above:`·`gauge_below:`는 get_buffs가 조회 때마다 보는 조건이다 — 게이지가
+                # 움직이면 이 프레임에 먼저 센 값이 낡는다(그레이브 `과열 II·III`, 일레그 `헬로 고스트`)
+                if gauges[gauge_id] != current:
+                    self._bump_value_version()
                 self._emit_every_stack(gauge_id, current, gauges[gauge_id], caster, t)
             else:  # gauge_consume / gauge_consume_as_ammo
                 if val == -1.0:  # fixed_value: -1 = 전체 소모
@@ -1532,6 +1564,8 @@ class BuffManager:
                 else:
                     consumed = min(val, current)
                     gauges[gauge_id] = max(0.0, current - val)
+                if gauges[gauge_id] != current:
+                    self._bump_value_version()
                 # gauge_consume_as_ammo: 실제 소모량만큼 squad_ammo_consume 이벤트 발생
                 if stat == "gauge_consume_as_ammo" and consumed > 0:
                     for _ in range(int(consumed)):
@@ -1564,6 +1598,7 @@ class BuffManager:
                     if not affected:
                         continue
                     ab.expires_at += val
+                    self._bump_value_version()
                     # DoT는 틱 스케줄이 _dot_timers에 별도로 복사돼 있다. ActiveBuff만
                     # 늘리면 표시만 길어지고 실제 틱은 원래 시각에서 끊긴다.
                     # (사쿠라 : 블룸 인 서머 `피어나다 3` — 적측 `벚꽃잎` 유지 시간 ▲)
@@ -2326,6 +2361,18 @@ class BuffManager:
             and name in (ab.target_chars or [])
             for ab in self._by_stat("element_code_override")
         )
+
+    def _innate_burst_stage(self, name: str) -> str:
+        """스킬로 바뀌기 전의 버스트 단계 — 원문의 「기본 버스트 단계」.
+
+        출처는 `BurstController._default_burst_stage`와 같다: 스쿼드 dict에 `burst_stage`를 적었으면 그 값
+        (A 니케의 자리 지정), 아니면 로스터 값. `state["burst_stages"]`는 틱마다 `burst_stage_override:N`이
+        반영된 **현재** 단계라, 「기본 버스트 단계가 Step 3인 아군」을 그걸로 가르면 `전투 보조`로 1버를 맡은
+        라피 : 레드 후드가 B3에서 빠진다 — 에이다 `은밀한 지원`이 그에게 한 번도 안 갔다
+        (제보: Moris-kr 포크 543bb9d).
+        """
+        pinned = (self._char.get(name) or {}).get("burst_stage")
+        return str(pinned or _NIKKE.get(name, {}).get("burst_stage", ""))
 
     def _has_persona_state(self, name: str) -> bool:
         """`persona_state` 마커 버프 보유 여부 — `allies_burst3_persona_excl_self` 판정용."""
@@ -3405,6 +3452,8 @@ class BuffManager:
                     c: (min(v + n, max_s) if max_s != -1 else v + n)
                     for c, v in ab.per_char_stacks.items()
                 }
+                # 대표 중첩이 상한이어도 캐릭터별 중첩은 오를 수 있다 — 아래 `continue` 전에 버린다
+                self._bump_value_version()
             if ab.stack == prev:
                 continue
             self._invalidate_buffs_cache()
@@ -3532,6 +3581,7 @@ class BuffManager:
 
                 if existing:
                     # 재발동: 타이머 갱신은 위에서 됐으므로 스택/만료만 갱신
+                    self._bump_value_version()
                     if max_stack == 1:
                         existing.expires_at = expires
                     elif scaling_ref and eff.get("scaling") == "stack_count":
@@ -3586,6 +3636,7 @@ class BuffManager:
                                    else last_t + duration)
                         ab.expires_at = expires
                         ab.stack = 0
+                        self._bump_value_version()
                         # 주기 틱은 램프가 끝난 뒤 +interval부터 잇는다.
                         self._dot_timers[id(eff)] = (caster, last_t + tick_interval, expires)
             elif self._damage_handler:
@@ -3681,6 +3732,8 @@ class BuffManager:
                     break
 
         if existing:
+            # 재발동은 `_active`의 구성을 안 바꾸고 값만 바꾼다(중첩·만료·발수·대상 복원·참조 중첩)
+            self._bump_value_version()
             if max_stack == 1:
                 existing.activated_at = t
                 existing.expires_at = expires
@@ -3930,6 +3983,7 @@ class BuffManager:
                     if ab is None:
                         continue
                     ab.stack = stack
+                    self._bump_value_version()
                     self._damage_handler(eff, caster, t)
 
         # ── 주기 대미지(tick_interval) — 만료 정리보다 **먼저** 처리한다 ──────
@@ -3973,7 +4027,7 @@ class BuffManager:
 
         # ── 소환체 주기 공격(feather_tick) ────────────────────────────────
         #
-        # DoT와 달리 주기가 고정이 아니다 — 생존 수 n에 대해 base × mult^(n-1)이고,
+        # DoT와 달리 주기가 고정이 아니다 — 살아 있는 페더가 많을수록 짧아지고(`_feather_interval`),
         # 다음 발사는 **직전 예약 시각 기준**으로 잡는다(프레임 양자화 드리프트 방지).
         # 히트 수는 timeline이 발사 시점에 `ref_count()`로 다시 읽는다.
         feathers = self.state.get("feathers")
@@ -3988,7 +4042,7 @@ class BuffManager:
                         st["next_t"] = None      # 전멸 — 재소환 전까지 정지
                         continue
                     self.notify("feather_tick", t, f_caster)
-                    st["next_t"] = nxt + st["base"] * st["mult"] ** (n - 1)
+                    st["next_t"] = nxt + _feather_interval(st["base"], st["step"], n)
 
         # 만료 버프 제거 + state_end 이벤트 발생
         expired_buffs = [ab for ab in self._active if t >= ab.expires_at]
@@ -4042,8 +4096,12 @@ class BuffManager:
                     self._activate(eff, caster, t)
                 else:
                     # 갱신은 조용히 한다 — 조건이 참인 내내 activate 로그가 쌓이지 않도록.
-                    # `get_buffs` 캐시 키에 t가 들어가므로 이 프레임 값은 바뀌지 않는다.
-                    ab.expires_at = max(ab.expires_at, self._expires_at(eff, caster, t))
+                    # 이 프레임 값이 바뀌는 건 **바로 이 프레임에 만료될 참이던** 것이 살아날 때뿐이다
+                    # (먼저 센 값에는 빠져 있다). 그때만 버린다 — 나머지는 매 프레임 헛도는 갱신이다.
+                    old = ab.expires_at
+                    ab.expires_at = max(old, self._expires_at(eff, caster, t))
+                    if old <= t < ab.expires_at:
+                        self._bump_value_version()
 
         # 조건부 passive 버프: 조건 충족 여부 변화 감지 → buff_event_handler 발생
         if self._buff_event_handler:
@@ -4169,6 +4227,36 @@ class BuffManager:
                 del self._instant_timers[eid]
 
     # ── 버프 집계 ─────────────────────────────────────────────────────────
+
+    def _bump_value_version(self):
+        """`_active`는 그대로인데 조회 결과가 달라지는 사건 — 캐시 키의 두 번째 번호를 올린다.
+
+        `_cache_version`은 버프가 붙고 떨어질 때 오른다. 이미 붙어 있는 버프가 재발동해 중첩·만료가
+        바뀌거나, 중첩이 오르내리거나, `gauge_above:`류 조건이 읽는 게이지가 움직일 때도 결과는
+        달라지는데 번호가 그대로라, 같은 프레임에 먼저 센 결과가 나중 조회에도 나갔다 — 그 프레임에
+        누가 먼저 물었느냐로 딜이 갈린다. 마스트 : 로망틱 메이드가 `버스트 1단계 진입`을 한 프레임에 두 번
+        받아 명중률이 −20 → −40이 되는데 두 번째 조회는 −20을 받았다(제보: Moris-kr 포크 90742f0).
+        계획은 그대로 쓴다 — 이런 버프는 계획에 접히지 않고 조회 때마다 평가된다(`_is_time_invariant`).
+        """
+        self._value_version += 1
+
+    def _audit_cached_buffs(self, cache_key: tuple, cached: dict) -> None:
+        """감사 모드(`_BUFF_AUDIT`): 캐시에서 꺼낸 결과를 그 자리에서 다시 센 결과와 맞춰 본다.
+
+        계획 대조는 `_active`가 바뀌었는데 번호가 안 오른 경우만 잡는다. 값만 바뀌었는데
+        `_bump_value_version()`을 빠뜨린 경로는 결과를 직접 비교해야 드러난다. `is_element_match`는
+        비교에서 뺀다 — 호출부(timeline)가 돌려받은 dict에 직접 적어 넣는 칸이다.
+        """
+        caster, target, t, _ver, _vver, exclude_names = cache_key
+        del self._buffs_cache[cache_key]
+        fresh = self.get_buffs(caster, target, t, exclude_names)
+        self._buffs_cache[cache_key] = cached   # 호출부가 쥔 객체를 그대로 둔다
+        stale = [k for k, v in fresh.items()
+                 if k != "is_element_match" and cached.get(k) != v]
+        if stale:
+            raise AssertionError(
+                f"get_buffs 캐시 결과가 다시 센 값과 다르다 (caster={caster}, t={t}, 키={stale[:5]}). "
+                f"조회 결과를 바꾸고 _bump_value_version()을 부르지 않은 경로가 있다.")
 
     def _invalidate_buffs_cache(self):
         self._cache_version += 1
@@ -4380,9 +4468,11 @@ class BuffManager:
         """
         # target도 키에 넣는다 — 딜 경로는 늘 적 센티널이지만, 같은 프레임에 다른 대상(아군·쫄몹)으로
         # 부른 결과를 돌려주면 대상에게 붙은 받는 대미지 계열이 섞인다
-        cache_key = (caster, target, t, self._cache_version, exclude_names)
+        cache_key = (caster, target, t, self._cache_version, self._value_version, exclude_names)
         cached = self._buffs_cache.get(cache_key)
         if cached is not None:
+            if _BUFF_AUDIT:
+                self._audit_cached_buffs(cache_key, cached)
             return cached
 
         plan = self._plan_cache.get((caster, target, exclude_names))
@@ -5034,8 +5124,7 @@ class BuffManager:
 
         if target.startswith("allies_lowest_atk_burst3:"):
             n = int(target.split(":")[1])
-            burst3 = [name for name in self._alive()
-                      if _NIKKE.get(name, {}).get("burst_stage") == "3"]
+            burst3 = [name for name in self._alive() if self._innate_burst_stage(name) == "3"]
             burst3.sort(key=self._effective_atk)
             return burst3[:n]
 
@@ -5168,24 +5257,23 @@ class BuffManager:
             # 시전자와 값이 같아 탈락한다.
             caster_def = self._effective_def(caster)
             return [n for n in self.squad_names if self._effective_def(n) < caster_def]
+        # 「기본 버스트 단계가 Step 3」으로 거르는 대상 넷(아래 셋 + 위 `allies_lowest_atk_burst3:`)은
+        # `_innate_burst_stage()` 하나로 판정한다 — 스킬로 바뀐 현재 단계(`state["burst_stages"]`)를 쓰지 않는다.
         if target == "allies_burst3":
-            burst_stages = self.state.get("burst_stages", {})
-            return [n for n in self.squad_names if burst_stages.get(n) == "3"]
+            return [n for n in self.squad_names if self._innate_burst_stage(n) == "3"]
         # "자신을 제외한 기본 버스트 단계 Step3인 페르소나 상태 아군 전체".
         # 페르소나 상태 = persona_state 마커 버프 보유. allies_with_buff:와 달리
         # 버프 이름이 캐릭터마다 다르므로(요한나/코노하나사쿠야) stat으로 판정한다.
         if target == "allies_burst3_persona_excl_self":
-            burst_stages = self.state.get("burst_stages", {})
             return [n for n in self.squad_names
-                    if n != caster and burst_stages.get(n) == "3" and self._has_persona_state(n)]
+                    if n != caster and self._innate_burst_stage(n) == "3" and self._has_persona_state(n)]
         # "직전에 버스트 스킬을 사용한 기본 버스트 단계 Step 3 아군" — burst_casted ∩ B3.
         # allies_burst_casted_weapon:과 같은 취지다 — burst_casted를 condition으로 두면
         # 시전자 기준으로만 평가돼 "누가 버스트를 썼나"를 대상 필터로 쓸 수 없다.
         if target == "allies_burst_casted_burst3":
             casted = self.state.get("burst_casted", {})
-            burst_stages = self.state.get("burst_stages", {})
             return [n for n in self.squad_names
-                    if casted.get(n) and burst_stages.get(n) == "3"]
+                    if casted.get(n) and self._innate_burst_stage(n) == "3"]
 
         # 적 관련 (타임라인 처리)
         # `same_target:[이름]`도 같은 적을 가리킨다 — 접두사까지 봐야 []로 새지 않는다.
