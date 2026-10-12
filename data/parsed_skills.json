@@ -10804,6 +10804,7 @@
       },
       "target": "enemies_random",
       "stat": "sequential_damage:6",
+      "land_in_full_burst": true,
       "values": {
         "1": 472.72,
         "2": 509.09,
@@ -10849,6 +10850,7 @@
       },
       "target": "enemies_random",
       "stat": "sequential_damage:13",
+      "land_in_full_burst": true,
       "values": {
         "1": 472.72,
         "2": 509.09,
@@ -15574,6 +15576,24 @@
     },
     {
       "source": "스킬2",
+      "type": "instant",
+      "name": "앵콜 (댄스 해제)",
+      "trigger": {
+        "timing": [
+          "event:떼창"
+        ],
+        "condition": [
+          "self_state:퍼포먼스"
+        ]
+      },
+      "target": "민트",
+      "stat": "remove_named_buff",
+      "target_effect": "무대 파트 : 댄스",
+      "remove_scope": "target",
+      "note": "[무대 파트 : 보컬] 부여의 배타 상태 처리. 같은 event:떼창 프레임에서 민트가 켠 댄스를 먼저 해제해 무대 파트 하나만 유지한다 (DILDORO 2026-09-23 계산 로직 정정)"
+    },
+    {
+      "source": "스킬2",
       "type": "buff",
       "name": "무대 파트 : 보컬",
       "trigger": {
@@ -17811,7 +17831,7 @@
       "target": "self",
       "stat": "atk_pct",
       "polarity": "beneficial",
-      "max_stack": 1,
+      "max_stack": 5,
       "values": {
         "1": 15.0,
         "2": 16.67,
@@ -17825,7 +17845,7 @@
         "10": 30.0
       },
       "duration": -1,
-      "note": "[최대 5단계]지만 ATK는 단계 무관 고정값 (유저 확인). 단계 카운터는 게이지 `과전류`(과전류 2)가 담당 — max_stack을 5로 두면 buff_manager가 값을 스택 수만큼 곱해 5단계에서 5배가 된다"
+      "note": "DILDORO 2026-10-06 계산 로직 수정 채택: [최대 5단계]에 따라 버스트마다 공격력 버프가 1중첩씩 쌓여 lv10에서 +30%→+150% (5단계 상한). 차지 시간 분기는 기존 별도 게이지 `과전류`(과전류 2)의 1~5단계를 계속 사용"
     },
     {
       "source": "스킬2",
@@ -23141,6 +23161,8 @@
       "scaling": "stack_count",
       "tick_interval": 1.0,
       "ramp_interval": 0.22,
+      "ramp_damage_stack": 1,
+      "post_ramp_tick_delay": 1.5,
       "duration": 10.0,
       "values": {
         "1": 20.77,
@@ -23671,6 +23693,31 @@
       "duration": -1
     },
     {
+      "source": "스킬3",
+      "type": "damage",
+      "name": "마하라기다인",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": []
+      },
+      "target": "all_enemies",
+      "stat": "split_damage",
+      "values": {
+        "1": 743.83,
+        "2": 801.05,
+        "3": 858.27,
+        "4": 915.49,
+        "5": 972.7,
+        "6": 1029.92,
+        "7": 1087.14,
+        "8": 1144.36,
+        "9": 1201.58,
+        "10": 1258.79
+      }
+    },
+    {
       "source": "스킬2",
       "type": "buff",
       "name": "화염 부스터",
@@ -23844,31 +23891,6 @@
       "duration": 25.0,
       "note": "수령자에게 event:추격 발생 → 퀸(마코토) 스킬1 분배 대미지",
       "event_scope": "recipients"
-    },
-    {
-      "source": "스킬3",
-      "type": "damage",
-      "name": "마하라기다인",
-      "trigger": {
-        "timing": [
-          "burst_cast"
-        ],
-        "condition": []
-      },
-      "target": "all_enemies",
-      "stat": "split_damage",
-      "values": {
-        "1": 743.83,
-        "2": 801.05,
-        "3": 858.27,
-        "4": 915.49,
-        "5": 972.7,
-        "6": 1029.92,
-        "7": 1087.14,
-        "8": 1144.36,
-        "9": 1201.58,
-        "10": 1258.79
-      }
     },
     {
       "source": "스킬3",
@@ -26116,7 +26138,7 @@
           "self_stack_above:크레센도:5"
         ]
       },
-      "target": "same_target",
+      "target": "same_target:클라이맥스",
       "stat": "bonus_damage",
       "values": {
         "1": 321.75,
@@ -32479,7 +32501,7 @@
         "10": 23.54
       },
       "duration": 30.0,
-      "note": "`intercept_dmg_pct`는 구현하지 않는 stat(🚫, 유저 결정 2026-08-11). 스킬2 `꽃잎 떨구기`의 `projectile_dmg_pct`와 다른 축이다 — 한 캐릭터가 둘 다 가진 첫 사례"
+      "note": "`intercept_dmg_pct`는 저지원에 실제로 닿은 대미지에 적용한다. 스킬2 `꽃잎 떨구기`의 `projectile_dmg_pct`와 다른 축이다 — 한 캐릭터가 둘 다 가진 첫 사례"
     }
   ],
   "일레그": [
@@ -33482,7 +33504,7 @@
       },
       "target": "all_enemies",
       "stat": "damage",
-      "scaling": "max_hp_additive",
+      "scaling": "max_hp_replacement",
       "values": {
         "1": 632.96,
         "2": 690.5,
@@ -33496,7 +33518,7 @@
         "10": 1150.84
       },
       "scaling_hp_pct": 5.0,
-      "note": "원문 `[최종 최대 체력의 5%를 공격력으로 **환산**한 N% 대미지]`. 문구는 메이든 : 아이스 로즈의 `합산`과 다르지만 **같은 키로 파싱한다**(유저 결정 2026-09-21) — 둘을 함께 가진 캐릭터가 없어 차이를 확인할 자료가 없다. 실제값 = (ATK + MaxHP × 0.05) × values[level] / 100"
+      "note": "원문 `[최종 최대 체력의 5%를 공격력으로 환산한 N% 대미지]`. 딜도로 2026-10-04 계산 로직 설명에 따라 이 공격은 기존 공격력 대신 최종 최대 체력의 5%를 공격력으로 사용한다. 공격력 버프를 더하지 않는다. `max_hp_additive`인 메이든 : 아이스 로즈와 구별한다"
     },
     {
       "source": "스킬3",
@@ -35255,6 +35277,7 @@
       },
       "target": "all_allies",
       "stat": "max_ammo_pct",
+      "max_ammo_reduction_exclusive": true,
       "polarity": "harmful",
       "max_stack": 1,
       "values": {
@@ -35270,7 +35293,7 @@
         "10": -51.13
       },
       "duration": 10.0,
-      "note": "`[정의 실현]` 묶음의 효과 1. 원문 `(동일 효과 중복 불가)`는 max_stack 1에서 이미 이름당 1인스턴스라 구현상 no-op이다. 값이 음수라 PARSING.md Step 6 규칙대로 polarity harmful — 같은 묶음의 효과 2(`정의 실현 2`)는 beneficial이다."
+      "note": "`[정의 실현]` 묶음의 효과 1. 원문 `(동일 효과 중복 불가)`는 다른 최대 장탄 감소와도 중복하지 않아 감소값 중 큰 것 하나만 적용한다(max_ammo_reduction_exclusive). 값이 음수라 PARSING.md Step 6 규칙대로 polarity harmful — 같은 묶음의 효과 2(`정의 실현 2`)는 beneficial이다."
     },
     {
       "source": "스킬2",

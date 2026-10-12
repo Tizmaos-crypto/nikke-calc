@@ -196,6 +196,7 @@ _BUFFS_ZERO: dict[str, Any] = {
     "charge_dmg_mag_pct": 0.0,
     "split_dmg_pct":    0.0,
     "part_dmg_pct":     0.0,
+    "intercept_dmg_pct": 0.0,
     # 관통 범위·폭발 범위 ▲(%) — 대미지 식에는 안 들어간다. 보스 패턴 좌표 off에서 이 발이 파츠에
     # 얼마나 멀리 닿는가(`boss_pattern.hit_reach` — 합 100% 이상이면 한 단계 더)에만 쓴다
     "pierce_range":     0.0,
@@ -275,6 +276,7 @@ _STAT_TO_BUFF: dict[str, str] = {
     "charge_dmg_mag_pct":   "charge_dmg_mag_pct",  # 차지 대미지 배율 ▲ (④ 승수)
     "split_dmg_pct":        "split_dmg_pct",        # 분배 대미지 ▲ (⑥에 합산)
     "part_dmg_pct":         "part_dmg_pct",         # 파츠 대미지 ▲ (⑤ 선택 합산)
+    "intercept_dmg_pct":    "intercept_dmg_pct",    # 저지원 명중 대미지 ▲ (⑤ 선택 합산)
     "pierce_range":         "pierce_range",         # 관통 범위 ▲ — 파츠 다중 타격 도달 단계에만
     "explosion_range":      "explosion_range",      # 폭발 범위 ▲ — 같은 자리
     "optimal_range_max_pct": "optimal_range_max_pct",  # 적정 최대 사거리 ▲ — 적정거리 판정에만
@@ -378,6 +380,33 @@ _CHARGE_IMMUNE_EXEMPT_SOURCES = frozenset(["equipment", "cube"])
 def _quant_source(ab) -> str | None:
     """`_source_tag`. 스킬 버프는 태그가 없어 None이다."""
     return ab.effect.get("_source_tag")
+
+
+def _nonstack_max_ammo_reductions(parts: dict[tuple, float]) -> dict[tuple, float]:
+    """「동일 효과 중복 불가」 장탄 감소가 있으면 감소 그룹 중 가장 큰 것만 남긴다.
+
+    증가 그룹은 그대로 가산한다. 그룹을 반올림하기 전에 비교해야 작은 기본 탄창에서도
+    어느 감소가 큰지 판정이 뒤집히지 않는다. K 「정의 실현」만 현재 이 규칙을 쓴다.
+    """
+    reductions = [
+        value for (key, _source, _group, _exclusive), value in parts.items()
+        if key == "max_ammo_pct" and value < 0
+    ]
+    if not reductions or not any(
+        key == "max_ammo_pct" and exclusive and value < 0
+        for (key, _source, _group, exclusive), value in parts.items()
+    ):
+        return parts
+    largest = min(reductions)
+    kept = False
+    result = {}
+    for group, value in parts.items():
+        if group[0] == "max_ammo_pct" and value < 0:
+            if value != largest or kept:
+                continue
+            kept = True
+        result[group] = value
+    return result
 
 
 def _equip_option_groups(stat: str, val) -> list[float]:
@@ -3637,8 +3666,11 @@ class BuffManager:
                         ab.expires_at = expires
                         ab.stack = 0
                         self._bump_value_version()
-                        # 주기 틱은 램프가 끝난 뒤 +interval부터 잇는다.
-                        self._dot_timers[id(eff)] = (caster, last_t + tick_interval, expires)
+                        # 기본 주기 틱은 램프가 끝난 뒤 +interval부터 잇는다.
+                        # 화양연화 2는 연타 중 1중첩 피해를 주고, 마지막 타격 1.5초 뒤부터
+                        # 완성된 10중첩 주기 틱이 시작된다.
+                        post_delay = float(eff.get("post_ramp_tick_delay", tick_interval))
+                        self._dot_timers[id(eff)] = (caster, last_t + post_delay, expires)
             elif self._damage_handler:
                 # tick_interval 없으면 즉시 1회 발동
                 self._damage_handler(eff, caster, t)
@@ -3984,7 +4016,19 @@ class BuffManager:
                         continue
                     ab.stack = stack
                     self._bump_value_version()
-                    self._damage_handler(eff, caster, t)
+                    ramp_damage_stack = eff.get("ramp_damage_stack")
+                    if ramp_damage_stack is None:
+                        self._damage_handler(eff, caster, t)
+                    else:
+                        # 중첩 상태는 누적하되 해당 연타의 피해 계수만 고정한다.
+                        # damage handler가 활성 DoT의 stack을 읽으므로 호출 동안만 바꾼다.
+                        ab.stack = int(ramp_damage_stack)
+                        self._bump_value_version()
+                        try:
+                            self._damage_handler(eff, caster, t)
+                        finally:
+                            ab.stack = stack
+                            self._bump_value_version()
 
         # ── 주기 대미지(tick_interval) — 만료 정리보다 **먼저** 처리한다 ──────
         #
@@ -4426,7 +4470,8 @@ class BuffManager:
         if stat in _CRIT_DMG_STATS:
             return (_PLAN_CDMG, stat in _NORMAL_ATK_ONLY_CRIT_DMG_STATS, val)
         if buff_key in _QUANT_BUFF_KEYS:
-            return (_PLAN_QUANT, (buff_key, _quant_source(ab), _quant_group_key(ab)), val)
+            return (_PLAN_QUANT, (buff_key, _quant_source(ab), _quant_group_key(ab),
+                                  bool(eff.get("max_ammo_reduction_exclusive"))), val)
         return (_PLAN_ADD, buff_key, val)
 
     def _build_plan(self, caster: str, target: str, exclude_names: frozenset[str]) -> list:
@@ -4602,7 +4647,8 @@ class BuffManager:
                 if stat not in _NORMAL_ATK_ONLY_CRIT_DMG_STATS:
                     crit_dmg_skill_parts.append(val)
             elif buff_key in _QUANT_BUFF_KEYS:
-                gk = (buff_key, _quant_source(ab), _quant_group_key(ab))
+                gk = (buff_key, _quant_source(ab), _quant_group_key(ab),
+                      bool(eff.get("max_ammo_reduction_exclusive")))
                 quant_parts[gk] = quant_parts.get(gk, 0.0) + val
             else:
                 buffs[buff_key] = buffs.get(buff_key, 0.0) + val
@@ -4619,10 +4665,11 @@ class BuffManager:
 
         # 소스별 반올림 스탯: 그룹별 목록과 합계를 함께 싣는다. 합계는 표시·후처리
         # (면역·초과분 환산)용이고, 실제 반올림은 기본값을 아는 timeline이 목록으로 한다.
+        quant_parts = _nonstack_max_ammo_reductions(quant_parts)
         parts_by_key: dict[str, list[float]] = {k: [] for k in _QUANT_BUFF_KEYS}
         # 면역 후처리가 소스를 봐야 하므로 목록과 같은 순서로 소스 태그도 싣는다.
         parts_src_by_key: dict[str, list[str | None]] = {k: [] for k in _QUANT_BUFF_KEYS}
-        for (bk, src, _group), v in quant_parts.items():
+        for (bk, src, _group, _exclusive), v in quant_parts.items():
             parts_by_key[bk].append(v)
             parts_src_by_key[bk].append(src)
             buffs[bk] = buffs.get(bk, 0.0) + v

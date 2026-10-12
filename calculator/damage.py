@@ -14,6 +14,7 @@ hit_type 딕셔너리:
     "is_core_damage":               False,  # core_damage 스킬 (확정 코어 명중 — is_normal_atk=False라도 ③ 코어 배율 적용)
     "is_weapon_mode_skill":         False,  # 무기 변경 모드의 스킬 대미지 사격 (나유타 `기억 연소`)
     "is_part":                      False,  # 파츠 명중 (part_dmg_pct 가산). 파츠를 명시한 스킬 + enemy.has_parts=True일 때만
+    "is_intercept":                 False,  # 저지원 명중 (intercept_dmg_pct 가산). 파츠·본체 히트에는 미적용
     "is_full_burst":                False,  # 풀버스트 타임 (+50%)
     "is_optimal_range":             False,  # 적정거리 (+30%, 스킬에는 미적용)
     "is_full_charge":               False,  # SR/RL 풀 차지 (④ 적용)
@@ -82,6 +83,7 @@ def default_hit_type(**overrides) -> dict:
         "is_sequential":                False,
         "is_split":                     False,
         "is_part":                      False,
+        "is_intercept":                 False,
         "crit_override":                None,
         "is_core_damage":               False,
         "is_normal_atk":                True,
@@ -274,6 +276,8 @@ def _factor5(buffs: dict, hit_type: dict) -> float:
     # 파츠 대미지 — hit_type["is_part"]로 제어
     if hit_type.get("is_part"):
         val += buffs.get("part_dmg_pct", 0.0) / 100.0
+    if hit_type.get("is_intercept"):
+        val += buffs.get("intercept_dmg_pct", 0.0) / 100.0
 
     return val
 

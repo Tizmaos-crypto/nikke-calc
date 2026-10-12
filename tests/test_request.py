@@ -47,7 +47,8 @@ class Schema(unittest.TestCase):
                         "chars": {"크라운": {"skill_levels": "7/7/7", "overload": {"공격력": 2},
                                            "equipment": {"머리": {"tier": "T9", "corp": "테트라", "level": 3}}}}},
             "chars": {"프리카": {"control": {"tap_fire": {"rate": 4.0, "window": "burst_charge"},
-                                            "burst": {"delay": 1.0, "pattern": [1]}},
+                                            "burst": {"delay": 1.0, "pattern": [1],
+                                                      "wait_own_cooldown": 1.5}},
                                 "cube": {"name": "렐릭 어설트 큐브", "level": 10},
                                 "weapon_mode_swap": False, "favorite_stage": 2}},
         })
@@ -78,6 +79,10 @@ class Schema(unittest.TestCase):
             ({**OK, "profile": {"chars": {"크라운": {"control": {}}}}}, "/profile/chars/크라운/control"),
             ({**OK, "profile": {"_account": {"console": {"이상": 1}}}}, "/profile/_account/console/이상"),
             ({**OK, "chars": {"크라운": {"auto": True}}}, "/chars/크라운/auto"),
+            ({**OK, "chars": {"크라운": {"control": {"burst": {"wait_own_cooldown": 0.49}}}}},
+             "/chars/크라운/control/burst/wait_own_cooldown"),
+            ({**OK, "chars": {"크라운": {"control": {"burst": {"wait_own_cooldown": 3.01}}}}},
+             "/chars/크라운/control/burst/wait_own_cooldown"),
         ]
         for req, path in cases:
             with self.subTest(req=req):

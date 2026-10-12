@@ -170,7 +170,7 @@
     · 관통 탄·폭발 탄: 본체 히트(착탄점이 코어 안이면 코어 — 앞 표적과 무관) + 착탄점에서 관통·폭발 반지름 안에
       닿는 표적마다 히트(`HitEvent.extra`). 둘을 겸하면 넓은 쪽
     · 기대값 모드는 확률로 나눈 히트, 난수 모드는 착탄점을 뽑는다
-  - 파츠 히트: 코어 없음 · 파츠 대미지 ▲ · **총딜 포함**(초과분도). 저지원 히트: 파츠 판정 없음 · **총딜 밖**
+  - 파츠 히트: 코어 없음 · 파츠 대미지 ▲ · **총딜 포함**(초과분도). 저지원 히트: 파츠 판정 없음 · 저지원 피해 ▲ · **총딜 밖**
     (`interrupt_dealt`, 유저 결정) — 저지원을 겨누는 만큼 점수를 잃는다. 둘 다 흡혈은 받는다
   - 관통·폭발로 따로 맞은 표적은 본체 히트의 크리 판정을 쓰고 트리거·게이지를 안 낸다. 보통 탄이 떨어진 표적은 그
     발의 명중이다 — 파츠면 「파츠 명중」, 본체(코어 아님)면 「본체 명중」 트리거
@@ -212,7 +212,7 @@
   관통·발사체 폭발은 저지원에도 같은 단계 규칙으로 닿는다. 좌표 모드의 저지원 히트와 같은 규약이다:
   - 단계는 1~4뿐이다 — 「파츠 포함」 전체기는 저지원에 안 닿는다(5는 거절). 그래서 저지원에 대한 발의 단계 상한은
     `hits_parts`를 빼고 잰다 — 전체기이면서 발사체 폭발인 발은 저지원에 3(또는 4)으로 닿는다
-  - 대미지: 같은 발을 **코어도 파츠 판정도 없이** 다시 산정(`interrupt_damage`) · 크리는 본체 판정 그대로
+  - 대미지: 같은 발을 **코어도 파츠 판정도 없이**, 저지원 피해 ▲(`intercept_dmg_pct`)를 얹어 다시 산정(`interrupt_damage`) · 크리는 본체 판정 그대로
   - **총딜 밖** — 시전자별로 `interrupt_dealt`에 쌓는다(좌표 모드와 같은 칸). 흡혈은 받는다. 트리거·게이지 없음
   - 그 발이 겨눈 저지원은 빠진다 — 한 발에 한 번
   timeline은 `enemy[INTERRUPT_REACH_KEY]`(산 reach 저지원 중 가장 낮은 단계, 없으면 0)를 파츠 쪽과 같이 본다.
@@ -1315,6 +1315,9 @@ class BossScript:
         # 보스가 사라졌는가. 딜 게이트는 `gate()`가 직접 하고, timeline은 이 값을 state에 실어
         # 무기 사격의 버스트 게이지를 거른다(평타가 빗나가면 그 게이지도 안 찬다).
         self.vanished = False
+        # 활성 사라짐이 모두 고정 시간에 끝날 때의 재출현 시각. 조건부 종료가 섞이면
+        # 앞당겨질 수 있어 예측하지 않는다 (헤비암즈의 2초 차지 대기 판단용).
+        self.vanish_return_at: float | None = None
         # 이번 프레임에 나가는 보스 공격·디버프 발(패턴 선언 순). `begin_frame()`이 채우고 timeline이 비운다.
         self.attacks: list[AttackHit] = []
         # buff_manager에 주입한 효과의 수명 — `begin_frame()`이 채우고 timeline이 **곧바로** 처리해 비운다.
@@ -1618,6 +1621,12 @@ class BossScript:
             setattr(self, attr, [r for r in live if reach.get(id(r))])
             enemy[key] = min((k for ks in reach.values() for k in ks), default=0)
         self.vanished = bool(vanish)
+        self.vanish_return_at = (
+            max(r.start_t + r.p.until_time for r in vanish)
+            if vanish and all(r.p.until_time is not None and not r.p.until_after
+                              and not r.p.until_cleared for r in vanish)
+            else None
+        )
         self.enemy_count = 1 + len(self._alive_adds())
         if self.coord is not None:
             self._apply_geom(live, enemy)

@@ -77,6 +77,7 @@ _CTRL_TYPES = {
         # 패턴 이름(data/char_defaults.json `_burst_patterns`) 또는 사이클 목록(1부터)
         "pattern": _off({"anyOf": [NAME, {"type": "array", "items": _int(1)}]}),
         "delay": _num(minimum=0),
+        "wait_own_cooldown": {"anyOf": [{"const": False}, _num(minimum=0.5, maximum=3.0)]},
     }},
     "sequence": {"type": "array"},
     "priority": {"type": ["string", "integer"]},

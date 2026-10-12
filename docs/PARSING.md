@@ -126,7 +126,11 @@ print(json.dumps(data['캐릭터명'], ensure_ascii=False, indent=2))
 | `skill_damage` | 선택 | weapon_change | 모드 사격이 **스킬 대미지**인 예외에만 `true`. 발수 소모 버프를 먹지 않고 집계도 모드명으로 잡힌다. 기본(미표기)은 일반 공격 — `GAMEPLAY.md` §무기 메카닉. 보유: 나유타 `기억 연소` |
 | `tick_interval` | 선택 | damage, instant | 주기적 발동 간격(초). DoT·주기 자동공격·주기 회복 등에 사용 |
 | `tick_start` | 선택 | damage | 주기 **대미지**의 첫 틱 위상. `"immediate"`(type 1 — 발동과 동시에 첫 틱) 또는 생략(type 2 — 발동 +interval부터, 기본). 회수는 양쪽 같다. 캐릭터별 유형은 `GAMEPLAY.md §효과 실행 순서` 표. 주기 instant(회복·게이지)는 이 필드를 쓰지 않는다 |
+| `ramp_interval` | 선택 | damage | `same_target:[name]` DoT에서 짝 순차 공격의 타간 간격(초). 사쿠라 : 블룸 인 서머 `화양연화 2`는 0.22 |
+| `ramp_damage_stack` | 선택 | damage | 위 DoT의 연타 중 각 피해를 현재 누적 중첩 대신 고정 중첩 배율로 계산할 때의 값. 사쿠라 : 블룸 인 서머 `화양연화 2`는 1 |
+| `post_ramp_tick_delay` | 선택 | damage | 마지막 연타 뒤 첫 주기 틱까지의 시간(초). 생략하면 `tick_interval`. 사쿠라 : 블룸 인 서머 `화양연화 2`는 1.5 |
 | `max_stack` | 선택 | buff | 중첩 한도. 명시 없으면 1. 무한 중첩이면 `-1` |
+| `max_ammo_reduction_exclusive` | 선택 | buff | 최대 장탄 감소가 다른 최대 장탄 감소와 중복되지 않을 때 `true`. 동시 적용된 감소 그룹 중 절댓값이 가장 큰 하나만 남기고, 장탄 증가 그룹은 그대로 더한다(K `정의 실현`). |
 | `max_trigger` | 선택 | 전체 | 전투 중 최대 발동 횟수. `[전투 중 N회 발동]` 블록 또는 buff/instant의 `[N회 발동]` 블록에서 추출. damage type의 `[N회 발동]`은 stat에 `:N` suffix로 표현하므로 `max_trigger` 사용 안 함 |
 | `damage_formula` | 선택 | damage | `"skill"`(기본값) 또는 `"normal_attack"` |
 | `weapon_type` | 선택 | damage, weapon_change | 해당 대미지/무기변경에 사용되는 무기 유형. `weapon_change`에서는 필수, `damage`에서는 `damage_formula: "normal_attack"` 항목에 명시. 미명시 시 유저에게 질문 |
@@ -137,14 +141,14 @@ print(json.dumps(data['캐릭터명'], ensure_ascii=False, indent=2))
 | `reload_time` | 선택 | weapon_change | 재장전 시간(초). 미명시 시 생략 |
 | `core_dmg_mult` | 선택 | weapon_change | 코어 대미지. 미명시 시 생략 |
 | `charge` | 선택 | weapon_change | 변경 무기가 **차지 무기인가**. 무기 유형과 독립된 축이라 `weapon_type`만으로는 못 가른다 — 드레이크 : 그레이트 빌런 `오버 오버 드라이브`가 SG인 채로 차지하는 첫 사례다. 생략하면 `weapon_type`의 무기군 기본값(SR/RL = 차지, AR/SMG/SG/MG = 연사)으로 떨어지므로, **기본값과 어긋날 때만 적는다** |
-| `entry_reload` | 선택 | weapon_change | 모드에 **들어갈 때 재장전 모션이 한 번 들어가는가**. 길이는 고정값이 아니라 그 캐릭터의 재장전 시간이라 재장전 속도 버프를 그대로 먹는다. 인게임에서는 모든 무기 변경이 이 모션을 가질 가능성이 높지만 **실측된 모드만 켠다** — 켜면 첫 발이 그만큼 밀려 딜이 움직인다. 보유: 드레이크 : 그레이트 빌런 `오버 오버 드라이브`(유저 실측 2026-09-03) |
+| `entry_reload` | 선택 | weapon_change | 모드에 **들어갈 때 재장전 모션이 한 번 들어가는가**. 기본 대기 시간은 그 캐릭터의 실효 재장전 시간이라 재장전 속도 버프를 받는다. 단, `data/weapon_delays.json`의 해당 모드에 고정 `entry_delay`가 있으면 그 값을 우선한다. 드레이크 : 그레이트 빌런 `오버 오버 드라이브`는 2026-10-06 정정값 0.45초를 사용한다. 실측된 모드에만 선언한다. |
 | `pellets` | 선택 | weapon_change | 변경 무기 1발의 펠릿 수. 원문 `펠릿 개수 : N개`. 생략하면 `weapon_type`의 무기군 기본값(SG 10, 그 외 1)으로 떨어진다 — 기본 무기의 펠릿을 물려받지 않는다 |
 | `fire_rate` | 선택 | weapon_change | 변경 무기의 **초당 발사 수**(rpm이 아니라 /s). 원문이 `공격 속도 : N% ▼`처럼 **비율**로 적더라도 여기에는 환산한 절대값을 적는다 — 무기군 기본 연사 × (1 − N/100). buff `attack_speed_pct`로 적지 않는 이유는 그쪽이 **다른 공속 버프와 가산**이라 무기 속성의 곱연산과 어긋나기 때문이다. 생략하면 **CDN 연사**(버스트가 `ChangeWeapon`이면 스크래퍼가 받는 `parsed_nikke.json` `weapon_change_fire_rate` — 효과의 `source` 슬롯으로 찾는다) → `weapon_type`의 무기군 기본 연사 순으로 떨어진다. **CDN 값이 있으면 적지 않는다** — 원문의 `공격 속도 N% ▼`도 이미 반영된 값이다(K 144rpm = 2.4/s). **총구 수(`muzzles`)도 같은 자리의 선택 필드이고 기본값이 1이다** — 원래 무기의 총구를 물려받지 않는다 (K `정의로운 수단` — SMG 24/s의 90% ▼ = 2.4). **CDN 값이 없는 MG 모드는 무기군 기본값의 예열(`fire_rate_max` 70/s)을 타므로 연사가 고정이면 `fire_rate_max`도 같은 값으로 적는다** — CDN 값은 하한·상한에 같이 들어가 이미 고정이다(네온 : 블루 오션 `풀 하이드로 샷`에 적힌 1.5/s는 자동 수집 전에 CDN 90rpm을 손으로 옮긴 값이다) |
 | `charge_time` | 선택 | weapon_change | 차지 시간(초). 차지 무기 전용, 미명시 시 생략(기본 1.0초) |
 | `full_charge_mult` | 선택 | weapon_change | 풀 차지 대미지. 차지 무기 전용, 미명시 시 생략 |
-| `scaling` | 선택 | damage, instant, buff | 특수 스케일링 기준. 단일 문자열 또는 복수 적용 시 배열. `"max_hp"`: 최대 체력 비례. `"stack_count"`: 지정 스택/게이지 수 비례 (실제값 = values[level] × 현재 스택 수). `"max_hp_additive"`: 최대 체력 N%를 공격력에 합산 후 대미지 계산 (`scaling_hp_pct` 필드에 N 기입). **원문 「공격력으로 환산」도 같은 키다**(유저 결정 2026-09-21 — 킬로 `우선 순위 지정`). `"lost_hp_pct"`: 잃은 체력 % 비례 (실제값 = values[level] × 잃은 체력%). `"max_ammo_count"`: 원문 「**최종 최대 장탄 수 1발 당** [stat] N% ▲」 — 실제값 = values[level] × 수령자의 실효 최대 장탄(에밀리아 `미정령의 축복 2`). 복수 사용 예: `"scaling": ["max_hp_additive", "stack_count"]` |
+| `scaling` | 선택 | damage, instant, buff | 특수 스케일링 기준. 단일 문자열 또는 복수 적용 시 배열. `"max_hp"`: 최대 체력 비례. `"stack_count"`: 지정 스택/게이지 수 비례 (실제값 = values[level] × 현재 스택 수). `"max_hp_additive"`: 최대 체력 N%를 공격력에 합산 후 대미지 계산 (`scaling_hp_pct` 필드에 N 기입). `"max_hp_replacement"`: 공격력을 최대 체력 N%로 대체한 뒤 대미지 계산하며 공격력 버프는 받지 않는다(킬로 `우선 순위 지정`). `"lost_hp_pct"`: 잃은 체력 % 비례 (실제값 = values[level] × 잃은 체력%). `"max_ammo_count"`: 원문 「**최종 최대 장탄 수 1발 당** [stat] N% ▲」 — 실제값 = values[level] × 수령자의 실효 최대 장탄(에밀리아 `미정령의 축복 2`). 복수 사용 예: `"scaling": ["max_hp_additive", "stack_count"]` |
 | `scaling_ref` | 선택 | damage, instant, buff | `scaling: "stack_count"` 사용 시 기준이 되는 버프/스택/게이지의 `name`. 생략 시 해당 효과 자신의 스택 기준 |
-| `scaling_hp_pct` | 선택 | damage, instant | `scaling: "max_hp_additive"` 사용 시 합산할 최대 체력 비율(%) |
+| `scaling_hp_pct` | 선택 | damage, instant | `scaling: "max_hp_additive"`면 합산할, `"max_hp_replacement"`면 공격력을 대체할 최대 체력 비율(%) |
 | `target_effect` | 선택 | buff, instant | 효과가 작용할 대상 효과의 `name`. `effect_interval`·`remove_named_buff` stat에서 필수 |
 | `remove_scope` | 선택 | instant | `remove_named_buff` 전용. `"target"`이면 **`target`으로 풀린 캐릭터에게서만** 그 이름의 버프를 지운다(여럿에게 걸린 인스턴스는 그 캐릭터만 빠진다). 생략하면 종전대로 이름이 같은 버프를 대상·시전자와 무관하게 전부 지운다. 서로 다른 캐릭터가 **같은 이름의 상태를 각자** 들고 있는데 한쪽만 바뀌어야 할 때 쓴다 — 짝끼리 모드를 동기화하는 길티 : 마이티 바니 · 신 : 스위프트 바니 `바니 모드`, 이름만 겹치는 남의 영구 버프를 지우지 않게 하는 퀸(마코토) `철・권・제・재! 해제 2`(아이기스 `라쿠카쟈`) |
 | `trigger_values` | 선택 | 전체 | timing의 N이 레벨마다 다를 때 사용. `timing`에 `"hit_count:{0}"` 형태로 플레이스홀더 기입, `trigger_values: {"1": 65, "2": 62, ...}`로 레벨별 값 기입. `note` 필드로 상황 설명 추가 |
@@ -288,6 +292,7 @@ template에 timing 키워드 없으면:
 > **같은 프레임에 함께 켜지고 같은 수명으로 함께 꺼지기** 때문이다(GAMEPLAY §효과 실행
 > 순서의 「원문 블록 순서 = 실행 순서」가 가르는 것은 딜과 버프의 선후지 동시에 켜지는
 > 버프끼리가 아니다).
+> 유키코는 예외다. 원문은 스킬2 `화염 부스터`를 스킬3 `마하라기다인`보다 앞에 적지만, [딜도로 2026-10-06 계산 로직 내역](https://dildoro.com/)의 실행 순서에 맞춰 해당 버스트의 피해가 먼저 오도록 배열을 둔다. 이 버스트에는 새 `화염 부스터`를 적용하지 않는다(`docs/scenarios/유키코.md`).
 > 지킨 예: 밀크 : 블루밍 바니 `부끄러움`(담체가 배열 끝, 하위 5개가 앞) ·
 > 아크레인저 블랙 `배터리 긴급 충전` → `변신` · 베스티 : 택티컬 업 `미사일 가이드 2` → `미사일 가이드`.
 > 위반해 잠복해 있던 예: 네온 : 비전 아이 `건강한 몸`(2026-09-10 수정).
@@ -745,6 +750,8 @@ template에 timing 키워드 없으면:
 | `sequential_damage` | 순차 공격 대미지. `[N회 순차 공격]` 블록이 있으면 `stat: "sequential_damage:N"` 형태로 N을 stat에 포함. target은 `"enemies_random"` (N 미명시) 또는 `"enemies_random:N"`. N이 스택/게이지 기반으로 동적인 경우 `stat: "sequential_damage:스택명"` 형태로 기입하고 `scaling_ref`는 사용하지 않는다. |
 | `core_damage` | 코어 명중 대미지. 원문에 `코어 명중` 이 명시된 스킬 딜. condition에 `core_hit`를 함께 적는다 — 코어 없는 적에서는 무발동이고, 코어가 있으면 **확정 코어 명중**(확률 판정 없음)으로 무기 코어 배율 + `core_dmg_pct` 버프가 실린다 |
 
+> **`land_in_full_burst: true`**: `burst_cast` 시전 후 실제 착탄이 풀버스트 진입 뒤인 B3 damage 효과에만 쓰는 예외 필드. 조건과 히트 수는 시전 순간 확정하고, 풀버스트 시작 뒤 버프로 대미지를 계산한다. 일레그 : 붐 앤 쇼크 `13 고스트` 두 분기에 사용한다. 일반 `sequential_damage`에는 적용하지 않는다.
+
 > **`hits_parts: true`**: 원문이 대상에 **파츠를 명시**한 damage 효과(`적 전체 (파츠 포함)` 등)에 붙이는 boolean 필드. 이게 붙은 히트만 파츠 판정을 받아 `part_dmg_pct` 버프가 실리며, 파츠 보유 보스(`enemy.has_parts`)일 때만 성립한다. 기본공격에는 붙지 않는다. 신데렐라 : 크리스탈 웨이브 `모드 스왑 2`
 
 ### 인스턴트 stat
@@ -939,7 +946,7 @@ duration이 원문에 없으면 §2 `duration` 행대로 처리한다 — `null`
 - 엄폐물 회복(`시전자의 최종 최대 체력 비례 엄폐물 체력 회복 N%`) → stat: `cover_heal_pct`, `"scaling": "max_hp"` 추가. 기준 표기 없는 `[엄폐물 체력 회복 N%]`에는 붙이지 않는다 — 그쪽은 엄폐물 최대 체력 기준이다(슈가 `블랙 타이푼 3` ↔ 나가 `우정의 가드`)
 - 보호막 회복(`시전자의 최종 최대 체력 비례 보호막 체력 회복 N%` · 어순이 바뀐 `… 보호막 체력 N% 회복`도 같다) → stat: `shield_heal_pct`, `"scaling": "max_hp"` 추가. 엄폐물 쪽과 같은 규약이다 (킬로 `자가 수복`, 라푼젤 : 퓨어 그레이스 `프레이 3`)
 - 디코이 회복(`시전자의 최종 최대 체력 비례 디코이 회복 N%` · 주기판 `… 디코이 지속 회복 N%` + `[N초 간격]`) → stat: `decoy_heal_pct`, `"scaling": "max_hp"` 추가. 위 둘과 같은 규약이다 (라이 `선배의 응원 2`·`선배의 모범 2`)
-- 대미지의 「공격력으로 합산/환산」(`시전자의 최종 최대 체력의 N%를 공격력으로 합산한 M% 대미지` · `최종 최대 체력의 N%를 공격력으로 환산한 M% 대미지`) → stat: `damage`, `"scaling": "max_hp_additive"` + `scaling_hp_pct: N`. **「합산」과 「환산」은 같은 키다**(유저 결정 2026-09-21) — 둘을 함께 가진 캐릭터가 없어 차이를 확인할 자료가 없다. 원문에 「공격력으로」가 들어간 이 문구에는 위 세 번째 항목의 `"scaling": "max_hp"`를 쓰지 않는다 — 기준이 체력 그 자체가 아니라 **체력에서 온 공격력**이라 대미지 공식에 들어가는 자리가 다르다 (메이든 : 아이스 로즈 `다이아몬드 더스트`, 킬로 `우선 순위 지정`)
+- 대미지의 「공격력으로 합산」은 stat: `damage`, `"scaling": "max_hp_additive"` + `scaling_hp_pct: N`이다(메이든 : 아이스 로즈 `다이아몬드 더스트`). 「공격력으로 환산」은 `"scaling": "max_hp_replacement"` + `scaling_hp_pct: N`으로, 해당 공격의 공격력을 최종 최대 체력 N%로 대체하고 공격력 버프를 받지 않는다(킬로 `우선 순위 지정`, 딜도로 2026-10-04 해석). 두 문구 모두 체력 자체를 피해 계수로 쓰는 `"scaling": "max_hp"`와 구별한다.
 
 ```json
 { "type": "damage", "stat": "damage", "scaling": "max_hp", "values": {...} }

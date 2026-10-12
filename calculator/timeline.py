@@ -116,6 +116,7 @@ _RELOAD_LEAD_DEFAULT   = 0.3   # 장전컨 A: 풀버스트 종료 몇 초 전에
 _RELOAD_MARGIN_DEFAULT = 0.1   # 장전컨 B: 풀버스트 시작 몇 초 뒤에 재장전이 끝나게 할지
 _HOLD_LEAD_DEFAULT     = 0.5   # 홀드컨: 풀버스트 종료 몇 초 전에 들고 있던 풀차지를 뗄지
 _CTRL_FRAME            = 1.0 / 60.0  # 한 프레임(초). 판정 직후를 가리킬 때 쓰는 최소 여유
+_FULL_BURST_ENTRY_DELAY = 0.37  # B3 버튼 → 풀버스트 시작 (DILDORO 2026-09-24 실측)
 
 # 클릭 스케줄 어휘. 정본: docs/CONTROL.md §체계.
 #   **언제**(아래 두 표기) / 행위(mode) — 무엇을
@@ -161,10 +162,11 @@ _RELOAD_KEYS = ("anchor", "offset", "minus", "gate", "buff") + (
 # 버스트 버튼 — **다섯째 원시 입력**이다. 정본: docs/CONTROL.md §L0.
 #   pattern  어느 사이클에 쓰는가 (러너가 `config["burst_pattern"]`으로 편다)
 #   delay    사이클 안에서 언제 누르는가 — 차례가 온 뒤 몇 초를 기다리나 (기본 0 = 즉시)
+#   wait_own_cooldown  자기 쿨이 곧 돌아오면 같은 단계 동료를 잠시 보류 (0.5~3초)
 # **조율(③) 대상이 아니다.** 배타 자원인 카메라를 이 입력만 요구하지 않기 때문이다 —
 # 조작자 배타의 예외이자 그 모델을 완성하는 조각이다(`_wants_control()`이 이걸 반환하지
 # 않는 것이 그 집행이다).
-_BURST_KEYS = ("pattern", "delay")
+_BURST_KEYS = ("pattern", "delay", "wait_own_cooldown")
 # 에임 — **여섯째 원시 입력**(마우스로 조준점을 옮긴다). 좌표 모드 보스(`enemy["coord"]`)에서만 뜻이 있다.
 # 정본: docs/CONTROL.md §에임.
 #   at        겨눌 곳 — 보스 스크립트의 표적 이름, 또는 "core"(열린 코어)
@@ -450,6 +452,11 @@ def validate_control(control: dict, who: str) -> None:
             f"쓸 수 있는 것: {list(_BURST_KEYS)}. docs/CONTROL.md §L0")
     if (d := (control.get("burst") or {}).get("delay")) is not None and float(d) < 0:
         raise ValueError(f"{who}: `control.burst.delay`는 0 이상이어야 한다 (받은 값 {d}).")
+    wait = (control.get("burst") or {}).get("wait_own_cooldown")
+    if wait is not None and wait is not False:
+        if isinstance(wait, bool) or not 0.5 <= float(wait) <= 3.0:
+            raise ValueError(
+                f"{who}: `control.burst.wait_own_cooldown`은 0.5~3초 또는 false여야 한다 (받은 값 {wait}).")
     raw = control.get("click")
     legacy = [k for k in ("tap_fire", "hold") if control.get(k)]
     if raw is not None and legacy:
@@ -663,9 +670,10 @@ def _reach_hit(enemy: dict, ht: dict, res: dict, buffs: dict, *, parts_skill: bo
                   pierce_range=buffs.get("pierce_range", 0.0))
     out: dict = {}
 
-    def again(is_part: bool) -> int:
+    def again(is_part: bool = False, is_intercept: bool = False) -> int:
         # 같은 발을 표적에 — 코어는 없다. 크리는 본체 판정을 그대로 쓴다(난수 안 먹음)
-        pht = dict(ht, is_part=is_part, is_core=False, core_prob=None, is_core_damage=False,
+        pht = dict(ht, is_part=is_part, is_intercept=is_intercept,
+                   is_core=False, core_prob=None, is_core_damage=False,
                    crit_override=None if expected else res["is_crit"], _debug_factors=False)
         return calc_damage(base_atk=base_atk, buffs=buffs, weapon=weapon, hit_type=pht,
                            enemy_def=enemy.get("def", 31784), expected=expected)["damage"]
@@ -678,7 +686,7 @@ def _reach_hit(enemy: dict, ht: dict, res: dict, buffs: dict, *, parts_skill: bo
         # 「파츠 포함」 전체기는 저지원에 안 닿는다 — 단계 상한을 그것 없이 잰다
         ireach = hit_reach(**ranges)
         if ireach >= need_i:
-            out.update(interrupt_reach=ireach, interrupt_damage=again(False))
+            out.update(interrupt_reach=ireach, interrupt_damage=again(is_intercept=True))
     return out
 
 
@@ -777,6 +785,9 @@ class CharState:
         self.warmup_shots: float = 0.0
         self.last_fire_t: float = -999.0
         self._last_inter: float = 0.0  # 직전 발사가 예약한 간격 (_cool_warmup 판정 기준)
+        self._vanish_warmup_start_t: float = -1.0
+        self._vanish_warmup_base: float = 0.0
+        self._vanish_warmup_idle: float = 0.0
 
         # delay 값: weapon_delays.json 기준
         _delay_exc = _DELAYS["_exceptions"].get(self.name, {})
@@ -1007,6 +1018,7 @@ class CharState:
         # 홀드(차지 유지): 풀차지가 끝나도 떼지 않고 지정 시각까지 들고 있는다 (차지형 전용).
         # 시퀀스로 시각을 직접 찍거나, 아래 홀드컨 정책이 사이클마다 시각을 계산해 준다.
         self._charge_full_t: float = -1.0   # 풀차지 도달 시각(래치). <0이면 아직 차지 중
+        self._vanish_charge_hold_until: float = -1.0
         self._hold_release_t: float = -1.0  # 떼기 시각. <0이면 홀드 안 함
         # 끝 시각을 미리 모르는 상태 창 홀드. 지금은 `burst_chain` 하나이며, 창이 닫힌 틱에
         # `_apply_click_schedule()` 또는 solo 조율의 `_release_control()`이 즉시 푼다.
@@ -1519,6 +1531,12 @@ class CharState:
 
     def _tick_auto(self, t: float, bm: BuffManager, enemy: dict, cfg: dict) -> list[HitEvent]:
         events = []
+        # 사라진 보스를 보고 있는 니케는 계속 사격한다. 나머지 자동 연사 니케는
+        # 발사를 멈추고 남은 탄이 있더라도 재장전한다 (DILDORO 2026-10-09).
+        if bm.state.get("boss_vanish") and self.name not in bm.state.get("camera", ()):
+            self._pause_auto_for_vanish(t, bm)
+            return events
+        self._vanish_warmup_start_t = -1.0
         if self.fire_mode == "auto_warmup":
             self._cool_warmup(t, bm)
         while t >= self.next_fire_time:
@@ -1541,6 +1559,24 @@ class CharState:
                 break
 
         return events
+
+    def _pause_auto_for_vanish(self, t: float, bm: BuffManager) -> None:
+        """사라짐 중 자동 사격을 쉬며 MG 예열을 실제 미사격 시간만큼 식힌다."""
+        if self.fire_mode == "auto_warmup":
+            if self._vanish_warmup_start_t < 0:
+                self._vanish_warmup_start_t = t
+                self._vanish_warmup_base = self.warmup_shots
+                self._vanish_warmup_idle = max(0.0, t - self.last_fire_t - self._last_inter)
+            cool_rate = self.warmup_bullets / self.mech.get("cooldown_time", 1.0)
+            idle = self._vanish_warmup_idle + t - self._vanish_warmup_start_t
+            self.warmup_shots = max(0.0, self._vanish_warmup_base - cool_rate * idle)
+            # 복귀 프레임의 일반 냉각과 중복 차감하지 않는다.
+            self.last_fire_t = t
+        # 사라짐 동안 밀린 사격을 복귀 프레임에 몰아 쏘지 않는다.
+        self.next_fire_time = max(self.next_fire_time, t + DT)
+        if (self.reloading_until <= 0 and self.ammo < self._full_ammo(bm, t)
+                and not self._has_infinite_ammo(bm, t)):
+            self._start_reload(t, bm, "재장전 시작(보스 사라짐)")
 
     def _cool_warmup(self, t: float, bm: BuffManager):
         # MG 예열은 식는 속도가 있다. 재장전·기절 등으로 사격이 멈춘 구간만큼
@@ -1623,6 +1659,7 @@ class CharState:
         다중 타격에서 빠진다(`aimed`, 한 발에 한 번). 명중 트리거는 겨눈 곳 — 파츠면 파츠 명중, 저지원이면 없음."""
         name, kind = stage
         is_part = kind == "parts"
+        is_intercept = kind == "interrupt"
 
         def calc(**over) -> dict:
             return calc_damage(base_atk=self.base_atk, buffs=buffs, weapon=self.weapon,
@@ -1637,11 +1674,12 @@ class CharState:
                            **_reach_hit(enemy, {**ht, "is_core": False, "core_prob": None}, body, buffs,
                                         parts_skill=False, base_atk=self.base_atk, weapon=self.weapon,
                                         expected=expected))
-            r = calc(is_part=is_part, crit_override=None if expected else body["is_crit"])
+            r = calc(is_part=is_part, is_intercept=is_intercept,
+                     crit_override=None if expected else body["is_crit"])
             tev = HitEvent(t=t, caster=self.name, damage=r["damage"], is_crit=r["is_crit"], hit_tag=tag_of(False),
                            target=name, extra=True, **more)
             return [bev, tev], part_f, 0.0, 0.0, body["crit_frac"]
-        r = calc(is_part=is_part)
+        r = calc(is_part=is_part, is_intercept=is_intercept)
         return ([HitEvent(t=t, caster=self.name, damage=r["damage"], is_crit=r["is_crit"], hit_tag=tag_of(False),
                           target=name, **more)], part_f, 0.0, 0.0, r["crit_frac"])
 
@@ -1676,7 +1714,8 @@ class CharState:
                 events.append(hit(body["damage"], body["is_crit"], L.core_under >= 1.0))
                 for g, q in zip(tg, L.reach):
                     if q > 0.0:
-                        r = calc(is_core=False, core_prob=None, is_core_damage=False, is_part=g.kind == "parts")
+                        r = calc(is_core=False, core_prob=None, is_core_damage=False,
+                                 is_part=g.kind == "parts", is_intercept=g.kind == "interrupt")
                         events.append(hit(round(r["damage"] * q), False, False, g.name, True))
                 return events, part_f, body_f, L.core_under, body["crit_frac"]
             wb = max(0.0, 1.0 - sum(L.front))
@@ -1686,7 +1725,8 @@ class CharState:
                 events.append(hit(round(body["damage"] * wb), body["is_crit"], pcb >= 1.0))
             for g, p in zip(tg, L.front):
                 if p > 0.0:
-                    r = calc(is_core=False, core_prob=None, is_core_damage=False, is_part=g.kind == "parts")
+                    r = calc(is_core=False, core_prob=None, is_core_damage=False,
+                             is_part=g.kind == "parts", is_intercept=g.kind == "interrupt")
                     events.append(hit(round(r["damage"] * p), False, False, g.name))
             return events, part_f, body_f, L.core_open, body["crit_frac"]
 
@@ -1700,13 +1740,15 @@ class CharState:
             events.append(hit(body["damage"], body["is_crit"], in_core))
             for g in tg:
                 if g.shape.contains(px, py, grow):
-                    r = calc(is_core=False, core_prob=None, is_core_damage=False, is_part=g.kind == "parts",
+                    r = calc(is_core=False, core_prob=None, is_core_damage=False,
+                             is_part=g.kind == "parts", is_intercept=g.kind == "interrupt",
                              crit_override=body["is_crit"])
                     events.append(hit(r["damage"], r["is_crit"], False, g.name, True))
             return (events, part_f, 1.0 if front is None and not in_core else 0.0,
                     1.0 if in_core else 0.0, body["crit_frac"])
         if front is not None:
-            r = calc(is_core=False, core_prob=None, is_core_damage=False, is_part=front.kind == "parts")
+            r = calc(is_core=False, core_prob=None, is_core_damage=False,
+                     is_part=front.kind == "parts", is_intercept=front.kind == "interrupt")
             events.append(hit(r["damage"], r["is_crit"], False, front.name))
             return events, part_f, 0.0, 0.0, r["crit_frac"]
         body = calc(is_core=in_core, core_prob=None)
@@ -1989,6 +2031,7 @@ class CharState:
                     return events
             self._charge_start_t = t
             self._charge_phase = "charging"
+            self._vanish_charge_hold_until = -1.0
             self._charge_hold_fired.clear()
             # **누름을 어떻게 할지는 차지 시작 시점에 한 번만 정한다(래치).** 매 프레임
             # 다시 보면 창 경계에서 한 발이 반쯤 톡톡이인 채로 갈라진다. 반대로 **떼는**
@@ -2061,6 +2104,18 @@ class CharState:
                 # 대기 중에도 charging=True라 "차지 중" 조건 버프가 유지된다 (실제 게임과 동일).
                 if self._hold_release_t >= 0 and t < self._hold_release_t:
                     return events
+                # 헤비암즈는 보스가 사라졌을 때 완성한 차지를 최대 2초까지 들고
+                # 재출현을 기다린다. 고정 패턴 종료가 그보다 늦으면 기다릴 이득이 없다.
+                # 이미 지정된 수동 홀드는 위에서 우선 처리한다.
+                if self._hold_release_t < 0 and self.name == "스노우 화이트 : 헤비암즈":
+                    if bm.state.get("boss_vanish"):
+                        return_at = bm.state.get("boss_vanish_return_at")
+                        if return_at is None or return_at - t <= 2.0:
+                            if self._vanish_charge_hold_until < 0:
+                                self._vanish_charge_hold_until = t + 2.0
+                            if t < self._vanish_charge_hold_until:
+                                return events
+                    self._vanish_charge_hold_until = -1.0
             events.extend(self._charge_fire(t, bm, enemy, cfg, is_full))
 
         elif self._charge_phase == "post_delay" and t >= self._post_delay_end_t:
@@ -2384,21 +2439,20 @@ class CharState:
         `duration_bullets`가 있으면 **실제 발사 발수를 세어**(`_wc_shots`) 소진 시
         end_weapon_change().
         """
-        # ── 모드 진입 재장전 ──────────────────────────────────────────
-        # **무기를 바꿔 드는 동안 재장전 모션이 한 번 들어간다** (드레이크 : 그레이트 빌런
-        # 유저 실측 2026-09-03 — 풀버스트 잔여 8.0초에 첫 발, 그 뒤 6발은 재장전 없이 연속).
-        # 길이는 고정 상수가 아니라 **이 캐릭터의 재장전 시간**이라 재장전 속도 버프를
-        # 그대로 먹는다 — 유저가 잰 약 0.5초가 기본 SG 1.50초에 버프가 먹은 값이다.
-        #
-        # **선언한 모드만 탄다(`entry_reload`).** 인게임에서는 모든 무기 변경이 이 모션을
-        # 가질 가능성이 높지만, 다른 모드는 실측이 없어 켜면 딜이 조용히 움직인다.
-        # 실측이 붙는 대로 하나씩 켜고, 전원 확인되면 기본값으로 올린다.
-        if (self._wc_new_session and wc_eff.get("entry_reload")
+        # ── 모드 진입 대기 ────────────────────────────────────────────
+        # 수동 실측 entry_delay는 재장전 속도와 무관한 고정 지연이다. 없을 때만
+        # 기존 entry_reload 모델로 떨어진다. 둘 모두 새 모드 세션의 첫 발 전에만 탄다.
+        wc_over = _DELAYS.get("_weapon_change", {}).get(self.name, {}).get(wc_eff.get("name", ""), {})
+        entry_delay = wc_over.get("entry_delay")
+        entry_label = "모드 진입 재장전" if wc_eff.get("entry_reload") else "모드 진입 대기"
+        if entry_delay is None and wc_eff.get("entry_reload"):
+            entry_delay = self._reload_duration(bm, t)
+        if (self._wc_new_session and entry_delay is not None
                 and self._wc_entry_reload_until < 0):
-            self._wc_entry_reload_until = t + self._reload_duration(bm, t)
+            self._wc_entry_reload_until = t + float(entry_delay)
             if self._sim_log is not None:
                 self._sim_log.reload_log.append(
-                    ReloadLogEntry(t=t, caster=self.name, event="모드 진입 재장전 시작"))
+                    ReloadLogEntry(t=t, caster=self.name, event=f"{entry_label} 시작"))
         if self._wc_entry_reload_until >= 0:
             if t < self._wc_entry_reload_until:
                 return []
@@ -2410,7 +2464,7 @@ class CharState:
             self._charge_full_t = -1.0
             if self._sim_log is not None:
                 self._sim_log.reload_log.append(
-                    ReloadLogEntry(t=t, caster=self.name, event="모드 진입 재장전 완료"))
+                    ReloadLogEntry(t=t, caster=self.name, event=f"{entry_label} 완료"))
 
         # weapon_change effect의 스킬 레벨별 damage_coeff 결정
         skill_lv = _get_skill_lv(self.char, wc_eff)
@@ -2456,7 +2510,6 @@ class CharState:
 
         # 변경 무기의 발사 메카닉. 수동 실측(weapon_delays `_weapon_change`) → 스킬 텍스트에
         # 명시된 값(wc_eff) → CDN(wc_cdn) → 변경 무기군 기본값 순으로 떨어진다.
-        wc_over = _DELAYS.get("_weapon_change", {}).get(self.name, {}).get(wc_eff.get("name", ""), {})
         # CDN은 변경 무기의 자기 레코드를 주지 않고 **연사만** 스킬 값 칸에 준다
         # (parse_nikke `weapon_change_fire_rate` — 효과의 `source` 슬롯으로 찾는다).
         # 값이 하나뿐이라 예열 곡선이 아니라 고정 연사로 읽어 하한·상한에 같이 둔다 — 벨벳 MG
@@ -3288,7 +3341,7 @@ class BurstController:
 
     버스트 쿨타임: 캐릭터별로 parsed_nikke.json 스킬3 쿨타임 필드에서 읽음.
     같은 단계에 N명 있어도 1명만 사용하면 다음 단계 진입.
-    우선순위: 스쿼드 입력 순서, 쿨타임 불가 시 다음 순위.
+    자동 선택: B1/B2는 선두만, B3는 스쿼드 입력 순서. 명시 제어는 우선한다.
     reenter: 같은 단계 재사용, 0.5초 딜레이, 단계 전환 없음.
     """
 
@@ -3309,6 +3362,7 @@ class BurstController:
         self._default_burst_stage: dict[str, str] = {
             c["name"]: c.get("burst_stage") or _NIKKE[c["name"]]["burst_stage"] for c in squad
         }
+        self._explicit_burst_stage = {c["name"] for c in squad if c.get("burst_stage") is not None}
 
         # 최대 풀버스트 횟수 / 사이클별 단계 사용 순서 / 버스트 미사용 캐릭터
         # (_rebuild_burst_order에서 참조하므로 burst_order 초기화 전에 설정)
@@ -3328,6 +3382,11 @@ class BurstController:
         # docs/CONTROL.md §L0. `{이름: 초}`이고 기본은 0(즉시)이라 안 주면 종전과 같다.
         # 러너가 `control["burst"]["delay"]`를 모아 넘긴다 — 패턴과 같은 통로다.
         self._burst_delay: dict = config.get("burst_delay") or {}
+        self._wait_own_cooldown: dict[str, float] = {
+            c["name"]: float(wait) for c in squad
+            if (wait := ((c.get("control") or {}).get("burst") or {}).get("wait_own_cooldown"))
+            is not None and wait is not False
+        }
         # 지금 단계가 **열린** 시각. 딜레이는 `max(이 값, 그 사람 쿨 해제)`부터 잰다 —
         # 그게 곧 "버튼에 불이 들어온 시각"이다.
         self._stage_open_t: float = -1.0
@@ -3372,7 +3431,7 @@ class BurstController:
 
         # 쿨타임 대기 중인 단계의 후보 목록 (대기가 아니면 None).
         # _next_action_t는 두 가지가 섞여 있다 — 의도된 딜레이(단계 전환 0.1s,
-        # reenter 0.5s, 풀버스트 진입 0.05s)와 "전원 쿨이라 기다린다"는 예측.
+        # reenter 0.5s, 풀버스트 진입 0.37s)와 "전원 쿨이라 기다린다"는 예측.
         # 앞쪽은 지켜야 하고 뒤쪽은 쿨이 바뀌면 다시 계산해야 한다.
         # 이 목록이 채워져 있을 때만 재계산해서 둘을 구분한다.
         self._cd_wait_candidates: list[str] | None = None
@@ -3388,6 +3447,9 @@ class BurstController:
 
         # 풀버스트 진입 시 발동할 버스트 대미지 (버프 적용 후 계산)
         self._pending_burst_dmg: list[tuple[str, dict, int]] = []  # (caster, eff, hit_count)
+        # 착탄이 풀버스트 시작 뒤인 일부 B3 연타. 시전 시 조건과 히트 수를 확정한다.
+        self._pending_landing_dmg: list[tuple[str, dict]] = []
+        self._landing_damage_handler = None
 
         # 현재 풀버스트 사이클의 3단계 버스트 발동자와 그 발동 시각 (fullburst_duration 귀속용)
         self._fb_caster: str = ""
@@ -3495,7 +3557,8 @@ class BurstController:
 
             # 재진입 자리에서는 해당 단계 후보 중 쿨이 풀린 캐릭터를 재선출한다
             # (재진입을 연 사람은 방금 썼으므로 이미 쿨이다).
-            ev, advanced, reenter_info = self._try_use_stage(stage, t, bm, state)
+            ev, advanced, reenter_info = self._try_use_stage(
+                stage, t, bm, state, reenter_slot=in_reenter_slot)
             events.extend(ev)
 
             # `reenter_info`가 돌아왔다는 것은 **버스트가 이미 나갔다**는 뜻이다 —
@@ -3514,7 +3577,7 @@ class BurstController:
             elif used:
                 if stage == "3":
                     self._phase = "switching"
-                    self._next_action_t = t + 0.05
+                    self._next_action_t = t + _FULL_BURST_ENTRY_DELAY
                 else:
                     next_stage = str(int(stage) + 1)
                     self._phase = f"stage:{next_stage}"
@@ -3591,6 +3654,10 @@ class BurstController:
                 self._cd_applied_at_cast[n] = 0
             # 버스트 스킬 대미지: full_burst_start 버프 적용 후 계산
             events.extend(self._fire_pending_burst_dmg(t, bm))
+            for caster, eff in self._pending_landing_dmg:
+                if self._landing_damage_handler is not None:
+                    events.extend(self._landing_damage_handler(eff, caster, t))
+            self._pending_landing_dmg.clear()
             if self._log is not None:
                 self._log.burst_log.append(BurstLogEntry(t=t, event="full_burst 시작", caster=""))
                 snap = BuffSnapshot(t=t, buffs_by_char={})
@@ -3649,7 +3716,7 @@ class BurstController:
             열림₁ = max(기준, 게이지 준비)          기준 = 풀버스트 중이면 그 종료, 아니면 지금
             누름ₖ = min over 후보 n ( max(열림ₖ, 쿨 해제[n]) + 딜레이[n] )
             열림ₖ₊₁ = 누름ₖ + burst_switch_delay
-            예측 = 누름₃ + 0.05                     (switching → 풀버스트 진입 딜레이)
+            예측 = 누름₃ + 0.37                     (switching → 풀버스트 진입 딜레이)
 
         **게이지는 보지 않는다**(유저 결정). `fixed`에서는 게이지 제약이
         `풀버스트 종료 + burst_regen_time`이라 이것도 확정값이므로 사슬에 넣지만,
@@ -3684,7 +3751,7 @@ class BurstController:
             first = int(self._phase.split(":")[1])
             base = max(t, self._next_action_t if self._next_action_t < math.inf else t)
         elif self._phase == "switching":
-            return max(t, self._next_action_t) + 0.05
+            return max(t, self._next_action_t)
 
         at = base
         for stage in (str(i) for i in range(first, 4)):
@@ -3695,7 +3762,7 @@ class BurstController:
                      + float(self._burst_delay.get(n, 0.0)) for n in cands)
             if stage != "3":
                 at += self.config.get("burst_switch_delay", 0.1)
-        return at + 0.05
+        return at + _FULL_BURST_ENTRY_DELAY
 
     def _predict_candidates(self, stage: str, cycle_idx: int) -> list[str]:
         """예측용 단계 후보. `_try_use_stage()`가 쓰는 것과 같은 출처.
@@ -3706,7 +3773,16 @@ class BurstController:
         if (self._burst_sequence is not None
                 and cycle_idx < len(self._burst_sequence)):
             return self._burst_sequence[cycle_idx].get(stage, [])
-        return self.burst_order.get(stage, [])
+        return self._automatic_candidates(stage, reenter_slot=self._phase == f"reenter:{stage}")
+
+    def _automatic_candidates(self, stage: str, *, reenter_slot: bool = False) -> list[str]:
+        """사이트 기본 자동 선택. 명시 패턴·단계와 재진입 짝은 제한하지 않는다."""
+        candidates = self.burst_order.get(stage, [])
+        if (stage in ("1", "2") and not reenter_slot and len(candidates) > 1
+                and not any(n in self._burst_pattern or n in self._explicit_burst_stage
+                            for n in candidates)):
+            return candidates[:1]
+        return candidates
 
     def _pattern_rank(self, name: str, cycle: int) -> int:
         """이번 사이클의 우선순위 등급. 낮을수록 먼저 쓴다 (`sorted`는 안정 정렬이라
@@ -3730,7 +3806,8 @@ class BurstController:
         return 0 if due else 2
 
     def _try_use_stage(
-        self, stage: str, t: float, bm: BuffManager, state: dict
+        self, stage: str, t: float, bm: BuffManager, state: dict,
+        *, reenter_slot: bool = False,
     ) -> tuple[list[HitEvent], bool, tuple | None]:
         """
         반환: (events, advanced, reenter_info)
@@ -3742,7 +3819,7 @@ class BurstController:
         ):
             candidates = self._burst_sequence[self._burst_count].get(stage, [])
         else:
-            candidates = self.burst_order.get(stage, [])
+            candidates = self._automatic_candidates(stage, reenter_slot=reenter_slot)
             if self._burst_pattern:
                 cycle = self._burst_count + 1   # 1-based — 유저가 세는 "N번째 버스트"
                 candidates = sorted(candidates, key=lambda n: self._pattern_rank(n, cycle))
@@ -3756,9 +3833,16 @@ class BurstController:
             return [], False, None
 
         for name in candidates:
-            if t < self.burst_ready_at.get(name, 0.0) - 1e-9:
-                continue
             if bm.is_stunned(name) or bm.is_down(name):
+                continue
+            ready_at = self.burst_ready_at.get(name, 0.0)
+            if t < ready_at - 1e-9:
+                # 이 니케가 직접 지정한 짧은 쿨 대기 동안은 같은 단계의 다른
+                # 후보를 누르지 않는다. 패턴/순서가 정한 선후 관계도 보존된다.
+                if ready_at - t <= self._wait_own_cooldown.get(name, 0.0) + 1e-9:
+                    self._next_action_t = ready_at
+                    self._cd_wait_candidates = [name]
+                    return [], False, None
                 continue
             # **딜레이 버스트** — 이 사람이 차례인데 유저가 아직 안 누른다.
             # 정본: docs/CONTROL.md §L0 · §딜레이 버스트.
@@ -3866,6 +3950,12 @@ class BurstController:
             if name == self._no_burst_char and self._burst_sequence is None:
                 continue
             stage = bm_active_stages.get(name) or self._default_burst_stage.get(name, "")
+            # 원래 단계 A는 조건 판정에 남긴다. 자동 버튼 후보에서만 기본 B3이며,
+            # 명시 단계와 스킬 단계 변경은 우선한다.
+            if (name == "레드 후드" and stage == "A"
+                    and name not in self._explicit_burst_stage
+                    and name not in bm_active_stages):
+                stage = "3"
             if stage == "A":
                 for s in ("1", "2", "3"):
                     order[s].append(name)
@@ -3935,8 +4025,9 @@ class BurstController:
 def _later_burst_cast_buffs(bm: BuffManager, caster: str, eff: dict) -> frozenset[str]:
     """`eff`보다 **뒤에** 서술된 같은 `burst_cast` 트리거 buff들의 이름.
 
-    parsed_skills.json의 배열 순서는 원문 `■` 블록 순서를 그대로 보존한다
-    (GAMEPLAY.md §효과 실행 순서). 딜 블록보다 뒤에 적힌 버프는 그 딜에 실리지 않으므로,
+    parsed_skills.json의 배열 순서는 대체로 원문 `■` 블록 순서를 보존한다.
+    유키코의 DILDORO 2026-10-06 예외처럼 실제 실행 순서로 재배열한 경우도 있다
+    (GAMEPLAY.md §효과 실행 순서). 딜 블록보다 뒤에 처리되는 버프는 그 딜에 실리지 않으므로,
     계산이 풀버스트로 밀리는 보류 딜에서 제외할 이름 집합을 만든다.
 
     목록은 `bm.char_effects()`에서 받는다 — 애장품 캐릭터는 원본에 안 쓰는 판본이
@@ -4553,6 +4644,7 @@ def simulate(
         # 보스가 사라졌는가(`vanish` 패턴). 보스 스케줄러가 프레임 맨 앞에서 갱신한다 —
         # 무기 사격이 게이지를 채울지를 `CharState._weapon_gauge_lands()`가 이것으로 판정한다.
         "boss_vanish":  False,
+        "boss_vanish_return_at": None,
         # 속성보호막이 이 캐스터의 딜을 막는가 — `BossScript.shield_blocks`. 보스 패턴이 없으면 None.
         # 막힌 스킬 대미지 몫의 게이지를 거르는 두 자리(`_weapon_gauge_lands`·스킬 대미지 핸들러)가 본다.
         "boss_shield_blocks": None,
@@ -4679,7 +4771,7 @@ def simulate(
     _dot_events: list[HitEvent] = []
 
     def _coord_skill_hits(cs: CharState, geom, eff: dict, ht: dict, res: dict, buffs: dict, t: float,
-                          hit_tag: str, expected: bool) -> list[HitEvent]:
+                          hit_tag: str, expected: bool, base_atk: float) -> list[HitEvent]:
         """좌표 모드 — 스킬 히트 하나가 표적에 **따로** 넣는 히트. 정본: boss_pattern.py §좌표 모드.
 
         「파츠 포함」 전체기(`hits_parts`)는 산 파츠 전부(저지원은 아니다), 관통 대미지·발사체 폭발 스킬은 시전자의
@@ -4695,9 +4787,10 @@ def simulate(
             hit = [g for g in geom.targets if g.shape.contains(ax, ay, grow)]
         out = []
         for g in hit:
-            pht = dict(ht, is_part=g.kind == "parts", is_core=False, core_prob=None, is_core_damage=False,
+            pht = dict(ht, is_part=g.kind == "parts", is_intercept=g.kind == "interrupt",
+                       is_core=False, core_prob=None, is_core_damage=False,
                        crit_override=None if expected else res["is_crit"], _debug_factors=False)
-            r = calc_damage(base_atk=cs.base_atk, buffs=buffs, weapon=cs.weapon, hit_type=pht,
+            r = calc_damage(base_atk=base_atk, buffs=buffs, weapon=cs.weapon, hit_type=pht,
                             enemy_def=enm.get("def", 31784), expected=expected)
             out.append(HitEvent(t=t, caster=cs.name, damage=r["damage"], is_crit=r["is_crit"],
                                 hit_tag=hit_tag, skill_name=eff.get("name", eff.get("stat", "")),
@@ -4822,9 +4915,27 @@ def simulate(
             burst_ctrl._pending_burst_dmg.append((caster, eff_with_coeff, hit_count))
             return
 
+        # 일레그 : 붐 앤 쇼크처럼 발동 조건은 시전 순간 확정되지만 투사체가
+        # 풀버스트 진입 뒤 착탄하는 효과만 opt-in한다. 게이지 소비 등 다른
+        # burst_cast 효과는 그대로 시전 시각에 실행된다.
+        if (eff.get("land_in_full_burst") and "burst_cast" in timings
+                and is_burst3 and not eff.get("_landing_resolved")):
+            parts = stat.split(":")
+            if len(parts) > 1 and parts[1].lstrip("-").isdigit():
+                hit_count = int(parts[1])
+            else:
+                hit_count = int(bm.ref_count(caster, parts[1]) or 0) if len(parts) > 1 else 1
+            pending_eff = dict(eff, _landing_resolved=True, _latched_hit_count=hit_count,
+                               _exclude_buffs=_later_burst_cast_buffs(bm, caster, eff))
+            burst_ctrl._pending_landing_dmg.append((caster, pending_eff))
+            return
+
         # damage_formula: "normal_attack" → is_normal_atk=True で일반 공격 버프 적용
         is_normal = eff.get("damage_formula") == "normal_attack"
-        buffs = bm.get_buffs(caster, "__enemy__", t)
+        buffs = bm.get_buffs(
+            caster, "__enemy__", t,
+            exclude_names=eff.get("_exclude_buffs", frozenset()),
+        )
         buffs["is_element_match"] = cs.element_match(bm)
         is_full_burst = bm.state.get("full_burst", False)
         stat = eff.get("stat", "damage")
@@ -4858,11 +4969,18 @@ def simulate(
             n = bm.ref_count(caster, ref)
             if n is not None:
                 hit_count = n
-        # scaling: "max_hp_additive" → 시전자의 최종 최대 체력 N%를 공격력에 더한 뒤 계산.
-        # 버프가 아니라 이 히트에만 얹는 항이라 buffs 사본의 atk_flat에 넣는다
-        # (`atk_from_hp_pct`와 같은 자리 · docs/PARSING.md §scaling).
+        if "_latched_hit_count" in eff:
+            hit_count = eff["_latched_hit_count"]
+        # HP 환산은 이 스킬 히트의 공격력 기준만 바꾼다. additive는 최종 최대 체력
+        # N%를 정액 공격력에 더하고, replacement는 기본 공격력을 그 값으로 대체한다.
         _scaling = eff.get("scaling")
         _scalings = _scaling if isinstance(_scaling, list) else ([_scaling] if _scaling else [])
+        skill_base_atk = cs.base_atk
+        if "max_hp_replacement" in _scalings:
+            skill_base_atk = bm.effective_max_hp(caster) * float(eff.get("scaling_hp_pct", 0.0)) / 100.0
+            # 환산값 자체가 이 히트의 공격력이다. 원래 공격력에 붙은 비율·정액 버프는
+            # 적용하지 않지만, 다른 대미지 층의 버프는 그대로 둔다.
+            buffs = dict(buffs, atk_pct=0.0, atk_flat=0.0)
         if "max_hp_additive" in _scalings:
             _pct = float(eff.get("scaling_hp_pct", 0.0))
             buffs = dict(buffs)
@@ -4925,9 +5043,9 @@ def simulate(
         geom = enm.get(GEOM_KEY)
         for _ in range(hit_count):
             if in_debug_window:
-                print(f"t={t:.3f}s  [{eff.get('name', stat)}]  base_atk={cs.base_atk:,}  enemy_def={enm.get('def', 31784):,}")
+                print(f"t={t:.3f}s  [{eff.get('name', stat)}]  base_atk={skill_base_atk:,}  enemy_def={enm.get('def', 31784):,}")
             res = calc_damage(
-                base_atk=cs.base_atk, buffs=buffs, weapon=cs.weapon,
+                base_atk=skill_base_atk, buffs=buffs, weapon=cs.weapon,
                 hit_type=ht, enemy_def=enm.get("def", 31784),
                 expected=(cfg.get("rng_mode") == "expected"),
             )
@@ -4940,13 +5058,14 @@ def simulate(
                 skill_name=eff.get("name", stat),
                 rule=hit_rule, split=(base_stat == "split_damage"), to=hit_to,
                 **(_reach_hit(enm, ht, res, buffs, parts_skill=bool(eff.get("hits_parts")),
-                              base_atk=cs.base_atk, weapon=cs.weapon,
+                              base_atk=skill_base_atk, weapon=cs.weapon,
                               expected=(cfg.get("rng_mode") == "expected"))
                    if geom is None else {}),
             ))
             if geom is not None:
                 _dot_events.extend(_coord_skill_hits(
-                    cs, geom, eff, ht, res, buffs, t, hit_tag, cfg.get("rng_mode") == "expected"))
+                    cs, geom, eff, ht, res, buffs, t, hit_tag,
+                    cfg.get("rng_mode") == "expected", skill_base_atk))
             # hit_count:[스킬명] 이벤트 — named damage effect 명중마다 발생.
             # 이 히트의 크리 여부를 함께 실어 보낸다 (`trigger_hit_crit` 조건용).
             # 기대값 모드에는 is_crit이 없으므로 crit_frac을 소수 누적해 같은 장기
@@ -4986,6 +5105,17 @@ def simulate(
             bm.notify(f"weapon_hit:{eff_name}", t, caster)
 
     bm.register_damage_handler(_handle_damage_eff)
+
+    def _handle_landing_damage(eff: dict, caster: str, t: float) -> list[HitEvent]:
+        # burst_ctrl.tick()은 일반 스킬 이벤트 버퍼를 비우는 자리보다 뒤다.
+        # 이 B3 착탄만 즉시 꺼내 같은 프레임의 보스 게이트와 명중 트리거로 보낸다.
+        start = len(_dot_events)
+        _handle_damage_eff(eff, caster, t)
+        hits = _dot_events[start:]
+        del _dot_events[start:]
+        return hits
+
+    burst_ctrl._landing_damage_handler = _handle_landing_damage
 
     if sim_log is not None:
         def _buff_event_cb(kind: str, name: str, caster: str, target: str, t: float, expires_at: float, value: float | None = None, stat: str | None = None):
@@ -5417,6 +5547,7 @@ def simulate(
         _boss_events += boss.begin_frame(0.0, enm)
         _boss_state_effects(0.0)
         state["boss_vanish"] = boss.vanished
+        state["boss_vanish_return_at"] = boss.vanish_return_at
         if boss.has_summons:
             state["enemy_count"] = boss.enemy_count
 
@@ -5446,6 +5577,7 @@ def simulate(
             _boss_events += boss.begin_frame(t, enm)
             _boss_state_effects(t)
             state["boss_vanish"] = boss.vanished
+            state["boss_vanish_return_at"] = boss.vanish_return_at
             # 적 수(보스 1 + 산 쫄몹)도 프레임 맨 앞에 정한다 — 프레임 안에서 쫄몹이 죽어도 다음 프레임에 반영
             if boss.has_summons:
                 state["enemy_count"] = boss.enemy_count

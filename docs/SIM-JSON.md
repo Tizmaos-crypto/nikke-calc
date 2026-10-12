@@ -373,6 +373,8 @@ python -m runner.sim "크라운,헬름" --expected --json --profile '{"base": "d
   명시한 값이 이긴다.
 - `burst.pattern`은 패턴 이름(`data/char_defaults.json`의 그 니케 `_burst_patterns`) 또는 **사이클 목록**(`[1, 3, 5]`,
   1부터 — 카탈로그 없이 직접)이다. `false` = 패턴 없음. `burst.delay`는 차례가 온 뒤 기다릴 초.
+- `burst.wait_own_cooldown`은 0.5~3초 또는 `false`다. 자기 쿨이 그 시간 안에 돌아오면 같은 단계의
+  뒤 후보를 기다리게 한다. 생략하면 대기하지 않는다.
 - 레이어 컨트롤을 통째로 지우려면 그 니케를 `operation.auto`에 넣는다 — 그러면 `control`만 남는다.
 
 ### `cube`
