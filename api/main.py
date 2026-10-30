@@ -12,6 +12,7 @@ Render 배포는 render.yaml 참고.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -30,6 +31,34 @@ from pydantic import BaseModel, Field
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROFILE_DIR = Path(REPO_ROOT) / "profiles"
 DEFAULT_TIMEOUT = 60  # 시뮬 1회 상한(초)
+
+
+def _engine_fingerprint(repo_root: Path) -> str:
+    """Identify calculation inputs, including local changes, without personal data."""
+    root = Path(repo_root)
+    files = set()
+    for folder, pattern in (("data", "*.json"), ("calculator", "*.py"), ("runner", "*.py")):
+        files.update(path for path in (root / folder).rglob(pattern)
+                     if path.is_file() and "__pycache__" not in path.parts)
+    wrapper = root / "api" / "main.py"
+    if wrapper.is_file():
+        files.add(wrapper)  # Request-to-CLI mapping can change calculated results.
+    digest = hashlib.sha256(b"nikke-calc-engine-v1\0")
+    for path in sorted(files, key=lambda value: value.relative_to(root).as_posix()):
+        name = path.relative_to(root).as_posix().encode("utf-8")
+        content = path.read_bytes()
+        digest.update(len(name).to_bytes(4, "big"))
+        digest.update(name)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return "sha256:" + digest.hexdigest()
+
+
+# Compute once at process startup. /health stays inexpensive, and a deployment
+# or a rollback cannot reuse calibration cached under different engine contents.
+_ENGINE_COMMIT = _engine_fingerprint(Path(REPO_ROOT))
+_SOURCE_COMMIT = os.environ.get("RENDER_GIT_COMMIT", "").strip()
+
 
 # CORS: React 앱 도메인만 허용. 배포 시 환경변수로 오버라이드.
 ALLOWED_ORIGINS = [
@@ -88,6 +117,7 @@ class SimRequest(BaseModel):
 
 
 class SimResponse(BaseModel):
+    engine: str = _ENGINE_COMMIT  # Identity of the process which produced this output.
     output: str
     stderr: str = ""
     returncode: int
@@ -185,7 +215,10 @@ def root() -> dict:
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "version": "0.3.0"}
+    result = {"status": "ok", "version": "0.3.0", "commit": _ENGINE_COMMIT}
+    if _SOURCE_COMMIT:
+        result["source_commit"] = _SOURCE_COMMIT
+    return result
 
 
 # ─────────────────────────────────────────────────────────────
