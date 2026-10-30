@@ -64,7 +64,7 @@ _SOURCE_COMMIT = os.environ.get("RENDER_GIT_COMMIT", "").strip()
 ALLOWED_ORIGINS = [
     o.strip() for o in os.environ.get(
         "ALLOWED_ORIGINS",
-        "http://localhost:3000,http://127.0.0.1:3000"
+        "https://nikke-raid.vercel.app,http://localhost:3000,http://127.0.0.1:3000"
     ).split(",") if o.strip()
 ]
 
