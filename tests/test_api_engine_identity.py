@@ -21,7 +21,7 @@ def api_functions():
     parsed = ast.parse(API_SOURCE.read_text(encoding="utf-8"))
     nodes = [copy.deepcopy(node) for node in parsed.body
              if isinstance(node, ast.FunctionDef)
-             and node.name in {"_engine_fingerprint", "health"}]
+             and node.name in {"_engine_fingerprint", "health", "_cors_origins"}]
     for node in nodes:
         node.decorator_list = []
     namespace = {"Path": Path, "hashlib": hashlib,
@@ -96,6 +96,14 @@ class EngineFingerprint(unittest.TestCase):
             if target.is_file():
                 os.utime(target, (1, 1))
         self.assertEqual(expected, self.fingerprint(self.root))
+
+    def test_production_origin_survives_legacy_local_only_environment_settings(self):
+        origins = self.functions["_cors_origins"]
+        self.assertEqual(origins("http://localhost:3000,http://127.0.0.1:3000"),
+                         ["https://nikke-raid.vercel.app", "http://localhost:3000", "http://127.0.0.1:3000"])
+        self.assertEqual(origins("https://additional.example, https://additional.example, "),
+                         ["https://nikke-raid.vercel.app", "https://additional.example"])
+        self.assertEqual(origins(""), ["https://nikke-raid.vercel.app"])
 
     def test_health_keeps_wrapper_version_and_uses_engine_content_identity(self):
         result = self.functions["health"]()

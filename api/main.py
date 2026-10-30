@@ -60,13 +60,17 @@ _ENGINE_COMMIT = _engine_fingerprint(Path(REPO_ROOT))
 _SOURCE_COMMIT = os.environ.get("RENDER_GIT_COMMIT", "").strip()
 
 
-# CORS: React 앱 도메인만 허용. 배포 시 환경변수로 오버라이드.
-ALLOWED_ORIGINS = [
-    o.strip() for o in os.environ.get(
-        "ALLOWED_ORIGINS",
-        "https://nikke-raid.vercel.app,http://localhost:3000,http://127.0.0.1:3000"
-    ).split(",") if o.strip()
-]
+# The production UI remains allowed when an older environment only lists local clients.
+# ALLOWED_ORIGINS supplies additional deployment/development origins.
+def _cors_origins(configured: str | None) -> list[str]:
+    configured = configured if configured is not None else "http://localhost:3000,http://127.0.0.1:3000"
+    return list(dict.fromkeys(["https://nikke-raid.vercel.app", *(
+        origin.strip() for origin in configured.split(",") if origin.strip()
+    )]))
+
+
+ALLOWED_ORIGINS = _cors_origins(os.environ.get("ALLOWED_ORIGINS"))
+
 
 app = FastAPI(title="nikke-calc API", version="0.3.0")  # v0.3: dildoro boss share proxy
 app.add_middleware(

@@ -7,7 +7,7 @@
 # 4. 배포 완료 후 URL 확인 (예: https://nikke-calc-api-xxxx.onrender.com)
 #
 # 환경변수:
-#   ALLOWED_ORIGINS — 우리 React 앱의 도메인 (콤마 구분). Render 대시보드에서 설정.
+#   ALLOWED_ORIGINS — 추가 허용 도메인 (콤마 구분). 운영 앱 nikke-raid.vercel.app은 코드에서 유지한다.
 #   예: https://your-app.vercel.app,https://your-domain.com,http://localhost:3000
 
 services:
