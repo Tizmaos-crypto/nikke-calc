@@ -1669,6 +1669,8 @@ class BuffManager:
             stack_value (int): 넘은 배수 경계 (`every_stack:이름:N` timing용)
             heal_source (str): 회복을 **건** 캐릭터 (`event:heal_received` 전용,
                 `not_self_caused_heal` 조건용). 받는 쪽은 `caster` 인자다
+            hit_target (tuple[str, ...]): opt-in damage가 실제로 명중한 적 ID.
+                `trigger_hit_target`은 이 문맥만 읽고, 없으면 빈 대상을 반환한다.
             dealt (float): 트리거한 탄이 준 대미지 (`full_charge_hit` 전용,
                 `dealt_fixed_damage`가 `notify_ctx()`로 읽는다)
 
@@ -3728,7 +3730,36 @@ class BuffManager:
         # target_chars 비교 없이 effect + caster만으로 식별
         name = eff.get("name", "")
         existing = None
+        # Opt-in only: one permanent, nonstacking named state may spread through
+        # different clauses/target sets. Union recipients instead of stacking a
+        # second copy on their overlap (마리안 : 퀸 `약점 개방`). Finite effects
+        # need independent recipient expiry and must retain the ordinary path.
+        merge_targets = (eff.get("merge_targets") is True and name
+                         and eff.get("type") == "buff" and max_stack == 1
+                         and expires == math.inf and targets is not None
+                         and duration_bullets == -1 and not lazy
+                         and not _has_runtime_cond(eff["trigger"].get("condition", []), expires))
+        if merge_targets:
+            for ab in self._active:
+                other = ab.effect
+                if (ab.caster == caster and other.get("merge_targets") is True
+                        and other.get("name") == name and other.get("stat") == eff.get("stat")
+                        and other.get("type") == "buff" and other.get("max_stack", 1) == 1
+                        and ab.expires_at == math.inf and ab.target_chars is not None
+                        and not ab.has_runtime_conditions
+                        and other.get("values") == eff.get("values")
+                        and other.get("fixed_value") == eff.get("fixed_value")
+                        and other.get("polarity") == eff.get("polarity")):
+                    existing = ab
+                    merged = list(dict.fromkeys(ab.target_chars + targets))
+                    if merged != ab.target_chars:
+                        ab.target_chars = merged
+                        self._invalidate_buffs_cache()
+                    eff = other
+                    break
         for ab in self._active:
+            if existing is not None:
+                break
             if ab.effect is eff and ab.caster == caster:
                 if lazy or use_per_target or ab.target_chars == targets:
                     existing = ab
@@ -5112,6 +5143,8 @@ class BuffManager:
                 result.extend(self._resolve_target(t, caster))
             return result
 
+        if target == "trigger_hit_target":
+            return [x for x in self.notify_ctx("hit_target", ()) if _is_enemy(x)]
         if target == "self":
             return [caster]
         # 캐릭터 이름 직접 지정 (예: "이사벨" — 아르카나 마법사 카드 예외)
@@ -5344,6 +5377,9 @@ class BuffManager:
             got = self.enemy_resolver(target, caster)
             if got is not None:
                 return got
+        if target.startswith("enemies_with_buff_strict:"):
+            state_name = target.split(":", 1)[1]
+            return ["__enemy__"] if self.enemy_has_state("__enemy__", state_name) else []
         return ["__enemy__"]
 
     def _code_weapon(self, code: str, wtype: str) -> list[str]:

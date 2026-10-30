@@ -47858,5 +47858,361 @@
       },
       "duration": 10.0
     }
+  ],
+  "마리안 : 퀸": [
+    {
+      "source": "스킬1",
+      "type": "buff",
+      "name": "임전 : 의지를 벼린 창끝",
+      "trigger": {
+        "timing": [
+          "battle_start"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "polarity": "neutral",
+      "max_stack": 1,
+      "duration": -1,
+      "note": "전투 시작 시부터 유지되는 순수 상태 담체. 실제 반복 피해는 다크 매터 창의 타이머를 사용한다."
+    },
+    {
+      "source": "스킬1",
+      "type": "damage",
+      "name": "다크 매터 창",
+      "trigger": {
+        "timing": [
+          "battle_start",
+          "every:4s"
+        ],
+        "condition": [
+          "self_state:임전 : 의지를 벼린 창끝"
+        ]
+      },
+      "target": "enemies_random",
+      "stat": "sequential_damage:7",
+      "values": {
+        "1": 74.16,
+        "2": 79.87,
+        "3": 85.57,
+        "4": 91.28,
+        "5": 96.98,
+        "6": 102.69,
+        "7": 108.39,
+        "8": 114.1,
+        "9": 119.8,
+        "10": 125.51
+      },
+      "per_hit_buffs": true,
+      "hit_target_context": true,
+      "note": "임시 해석: 전투 시작 첫 창 후 4초 반복. 한 창마다 실제 적중 대상을 통지하고 다음 창 전에 버프를 다시 읽는다. 첫 발 위상은 실측 미검증."
+    },
+    {
+      "source": "스킬1",
+      "type": "buff",
+      "name": "약점 개방",
+      "trigger": {
+        "timing": [
+          "hit_count:다크 매터 창:1"
+        ],
+        "condition": []
+      },
+      "target": "trigger_hit_target",
+      "stat": "received_dmg_pct",
+      "polarity": "harmful_irremovable",
+      "max_stack": 1,
+      "values": {
+        "1": 2.98,
+        "2": 3.21,
+        "3": 3.44,
+        "4": 3.67,
+        "5": 3.9,
+        "6": 4.13,
+        "7": 4.36,
+        "8": 4.59,
+        "9": 4.82,
+        "10": 5.05
+      },
+      "duration": -1,
+      "note": "같은 상태의 두 부여 경로 — PARSING Step7 예외. 창·버스트 모두 동일 이름/수치이며 max_stack=1로 중첩시키지 않는다. merge_targets로 창 명중 대상과 버스트 전체 대상의 집합만 합쳐 같은 적에게 이중 적용하지 않는다.",
+      "merge_targets": true
+    },
+    {
+      "source": "스킬1",
+      "type": "buff",
+      "name": "약점 개방",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": []
+      },
+      "target": "all_enemies",
+      "stat": "received_dmg_pct",
+      "polarity": "harmful_irremovable",
+      "max_stack": 1,
+      "values": {
+        "1": 2.98,
+        "2": 3.21,
+        "3": 3.44,
+        "4": 3.67,
+        "5": 3.9,
+        "6": 4.13,
+        "7": 4.36,
+        "8": 4.59,
+        "9": 4.82,
+        "10": 5.05
+      },
+      "duration": -1,
+      "note": "같은 상태의 두 부여 경로 — PARSING Step7 예외. 창·버스트 모두 동일 이름/수치이며 max_stack=1로 중첩시키지 않는다. merge_targets로 창 명중 대상과 버스트 전체 대상의 집합만 합쳐 같은 적에게 이중 적용하지 않는다.",
+      "merge_targets": true
+    },
+    {
+      "source": "스킬2",
+      "type": "buff",
+      "name": "임전 : 파고드는 소망",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "polarity": "neutral",
+      "max_stack": 1,
+      "duration": 10,
+      "note": "본인 버스트로 켜지는 10초 상태 담체. 일반 공격 카운터는 기존 전투 누적 카운터를 따르며 상태가 피해 발동만 제한한다."
+    },
+    {
+      "source": "스킬2",
+      "type": "damage",
+      "name": "유사 세계",
+      "trigger": {
+        "timing": [
+          "on_attack_count:2"
+        ],
+        "condition": [
+          "self_state:임전 : 파고드는 소망"
+        ]
+      },
+      "target": "enemies_with_buff_strict:약점 개방",
+      "stat": "core_damage",
+      "values": {
+        "1": 8.31,
+        "2": 8.95,
+        "3": 9.59,
+        "4": 10.22,
+        "5": 10.86,
+        "6": 11.5,
+        "7": 12.14,
+        "8": 12.78,
+        "9": 13.42,
+        "10": 14.06
+      },
+      "note": "원문은 코어 활성 조건 없이 코어 명중 대미지를 명시한다. core_hit 조건을 덧붙이지 않고 확정 코어 피해로 처리한다. 빈 상태 대상 집합을 보스로 대체하지 않는다."
+    },
+    {
+      "source": "스킬2",
+      "type": "buff",
+      "name": "유사 세계 2",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "effect_interval",
+      "polarity": "beneficial",
+      "max_stack": 1,
+      "fixed_value": -2.0,
+      "duration": 10,
+      "target_effect": "다크 매터 창",
+      "note": "창 피해의 every:4s 타이머를 2초 단축한다. 남은 시간은 기존 effect_interval의 비례 조정 규약을 따른다. 모드 지속이 종료되면 4초로 복귀한다."
+    },
+    {
+      "source": "스킬2",
+      "type": "buff",
+      "name": "유사 세계 3",
+      "trigger": {
+        "timing": [
+          "full_burst_start"
+        ],
+        "condition": [
+          "not_self_state:임전 : 파고드는 소망"
+        ]
+      },
+      "target": "self",
+      "stat": "sequential_dmg_pct",
+      "polarity": "beneficial",
+      "max_stack": 1,
+      "values": {
+        "1": 50.33,
+        "2": 54.2,
+        "3": 58.07,
+        "4": 61.94,
+        "5": 65.81,
+        "6": 69.68,
+        "7": 73.56,
+        "8": 77.43,
+        "9": 81.3,
+        "10": 85.17
+      },
+      "duration": 10
+    },
+    {
+      "source": "스킬2",
+      "type": "buff",
+      "name": "유사 세계 4",
+      "trigger": {
+        "timing": [
+          "full_burst_start"
+        ],
+        "condition": [
+          "self_state:임전 : 파고드는 소망"
+        ]
+      },
+      "target": "self",
+      "stat": "core_dmg_pct",
+      "polarity": "beneficial",
+      "max_stack": 1,
+      "values": {
+        "1": 14.56,
+        "2": 15.68,
+        "3": 16.8,
+        "4": 17.92,
+        "5": 19.04,
+        "6": 20.16,
+        "7": 21.28,
+        "8": 22.4,
+        "9": 23.52,
+        "10": 24.64
+      },
+      "duration": 10
+    },
+    {
+      "source": "스킬3",
+      "type": "instant",
+      "name": "머나먼 신세계",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "ammo_charge_pct",
+      "values": {
+        "1": 59.09,
+        "2": 63.64,
+        "3": 68.18,
+        "4": 72.73,
+        "5": 77.27,
+        "6": 81.82,
+        "7": 86.37,
+        "8": 90.91,
+        "9": 95.46,
+        "10": 100.0
+      }
+    },
+    {
+      "source": "스킬3",
+      "type": "buff",
+      "name": "머나먼 신세계 2",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "mg_warmup_speed_pct",
+      "polarity": "beneficial",
+      "max_stack": 1,
+      "fixed_value": 100.0,
+      "duration": 10,
+      "note": "예열 속도 100% 증가이며 즉시 최대 예열로 바꾸지 않는다."
+    },
+    {
+      "source": "스킬3",
+      "type": "buff",
+      "name": "머나먼 신세계 3",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "atk_pct",
+      "polarity": "beneficial",
+      "max_stack": 1,
+      "values": {
+        "1": 46.33,
+        "2": 49.89,
+        "3": 53.46,
+        "4": 57.02,
+        "5": 60.58,
+        "6": 64.15,
+        "7": 67.71,
+        "8": 71.28,
+        "9": 74.84,
+        "10": 78.4
+      },
+      "duration": 10
+    },
+    {
+      "source": "스킬3",
+      "type": "buff",
+      "name": "머나먼 신세계 4",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "atk_dmg_pct",
+      "polarity": "beneficial",
+      "max_stack": 1,
+      "values": {
+        "1": 46.17,
+        "2": 49.72,
+        "3": 53.28,
+        "4": 56.83,
+        "5": 60.38,
+        "6": 63.93,
+        "7": 67.48,
+        "8": 71.04,
+        "9": 74.59,
+        "10": 78.14
+      },
+      "duration": 10
+    },
+    {
+      "source": "스킬3",
+      "type": "damage",
+      "name": "머나먼 신세계 5",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": []
+      },
+      "target": "all_enemies",
+      "stat": "burst_damage",
+      "values": {
+        "1": 795.6,
+        "2": 856.8,
+        "3": 918.0,
+        "4": 979.2,
+        "5": 1040.4,
+        "6": 1101.6,
+        "7": 1162.8,
+        "8": 1224.0,
+        "9": 1285.2,
+        "10": 1346.4
+      }
+    }
   ]
 }

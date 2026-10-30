@@ -1752,9 +1752,11 @@ class BossScript:
             else:
                 order = list(ids)
             return order + [ENEMY], max(n, 1)
-        if rule == "enemies_with_buff":
+        if rule in ("enemies_with_buff", "enemies_with_buff_strict"):
             hit = [x for x in [ENEMY] + ids if has_state is not None and has_state(x, arg)]
-            return (hit, len(hit)) if hit else ([ENEMY], 1)
+            if hit or rule == "enemies_with_buff_strict":
+                return hit, len(hit)
+            return [ENEMY], 1
         if rule in ("enemies_code", "enemies_lowest_hp_code"):
             return [ENEMY], 1       # 쫄몹 코드가 없다 — 단일 보스 때처럼 필터를 안 건다
         if rule == "boss":

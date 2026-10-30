@@ -5040,45 +5040,78 @@ def simulate(
             if _ab is not None and _ab.target_chars is not None:
                 hit_to = tuple(x for x in _ab.target_chars if _is_enemy(x))
 
-        geom = enm.get(GEOM_KEY)
-        for _ in range(hit_count):
+        def _emit_skill_hit(current_buffs, current_to, recipient):
             if in_debug_window:
                 print(f"t={t:.3f}s  [{eff.get('name', stat)}]  base_atk={skill_base_atk:,}  enemy_def={enm.get('def', 31784):,}")
             res = calc_damage(
-                base_atk=skill_base_atk, buffs=buffs, weapon=cs.weapon,
+                base_atk=skill_base_atk, buffs=current_buffs, weapon=cs.weapon,
                 hit_type=ht, enemy_def=enm.get("def", 31784),
                 expected=(cfg.get("rng_mode") == "expected"),
             )
             if in_debug_window:
                 print()
             hit_tag = "normal_skill" if is_normal else base_stat
-            _dot_events.append(HitEvent(
+            hit = HitEvent(
                 t=t, caster=caster, damage=res["damage"],
                 is_crit=res["is_crit"], hit_tag=hit_tag,
                 skill_name=eff.get("name", stat),
-                rule=hit_rule, split=(base_stat == "split_damage"), to=hit_to,
-                **(_reach_hit(enm, ht, res, buffs, parts_skill=bool(eff.get("hits_parts")),
+                rule=hit_rule, split=(base_stat == "split_damage"), to=current_to,
+                **(_reach_hit(enm, ht, res, current_buffs, parts_skill=bool(eff.get("hits_parts")),
                               base_atk=skill_base_atk, weapon=cs.weapon,
                               expected=(cfg.get("rng_mode") == "expected"))
                    if geom is None else {}),
-            ))
+            )
+            landed = _land(hit, t) if hit_context else ()
+            if not hit_context:
+                _dot_events.append(hit)
             if geom is not None:
                 _dot_events.extend(_coord_skill_hits(
-                    cs, geom, eff, ht, res, buffs, t, hit_tag,
+                    cs, geom, eff, ht, res, current_buffs, t, hit_tag,
                     cfg.get("rng_mode") == "expected", skill_base_atk))
             # hit_count:[스킬명] 이벤트 — named damage effect 명중마다 발생.
             # 이 히트의 크리 여부를 함께 실어 보낸다 (`trigger_hit_crit` 조건용).
             # 기대값 모드에는 is_crit이 없으므로 crit_frac을 소수 누적해 같은 장기
             # 빈도로 발화시킨다 — 일반 공격의 crit_hit 처리와 같은 규약이다.
-            if eff_name:
+            if eff_name and (not hit_context or landed):
                 hit_crit = res["is_crit"]
                 if not hit_crit and cfg.get("rng_mode") == "expected":
                     _crit_fired: list[int] = []
                     _notify_frac(bm, f"skill_crit:{eff_name}", caster,
                                  res.get("crit_frac", 0.0), lambda: _crit_fired.append(1))
                     hit_crit = bool(_crit_fired)
-                bm.notify(f"hit_count:{eff_name}", t, caster, hit_crit=hit_crit)
+                ctx = {"hit_target": tuple(landed)} if hit_context else {}
+                bm.notify(f"hit_count:{eff_name}", t, caster, hit_crit=hit_crit, **ctx)
 
+        # Explicit hit context freezes random selection before both routing and
+        # its named-hit trigger. Strict filtered attacks also need per-recipient
+        # buffs and an empty filter must produce neither a hit nor gauge gain.
+        hit_context = eff.get("hit_target_context") is True
+        strict_targets = hit_rule.startswith("enemies_with_buff_strict:")
+        resolved_hits = hit_context or strict_targets
+        if strict_targets and not bm._resolve_target(hit_rule, caster):
+            return
+        geom = enm.get(GEOM_KEY)
+        for _ in range(hit_count):
+            targets = bm._resolve_target(hit_rule, caster) if resolved_hits else [None]
+            for recipient in targets:
+                current_to = (recipient,) if resolved_hits else hit_to
+                current_buffs = buffs
+                if eff.get("per_hit_buffs") is True or resolved_hits:
+                    current_buffs = bm.get_buffs(
+                        caster, recipient or "__enemy__", t,
+                        exclude_names=eff.get("_exclude_buffs", frozenset()),
+                    )
+                    current_buffs = dict(current_buffs, is_element_match=cs.element_match(bm))
+                    if "max_hp_replacement" in _scalings:
+                        current_buffs.update(atk_pct=0.0, atk_flat=0.0)
+                    if "max_hp_additive" in _scalings:
+                        current_buffs["atk_flat"] = (current_buffs.get("atk_flat", 0.0)
+                            + bm.effective_max_hp(caster) * float(eff.get("scaling_hp_pct", 0.0)) / 100.0)
+                _emit_skill_hit(current_buffs, current_to, recipient)
+
+        # Existing effects keep their queued landing order. Only an opted-in
+        # sequential packet lands now so each subsequent hit observes its wounds
+        # and excludes adds killed by an earlier hit in that packet.
         # 스킬 대미지도 무기와 **같은 히트당 값**으로 게이지를 준다. 풀차지 배율은 없다.
         # 리버렐리오(무기 1발 14.0 + 추가타 5 × 5.6 = 42.0%)와 스노우 화이트 : 헤비암즈
         # (14.0 + 6 × 5.6 = 47.6%) 실측이 이 규칙을 결정했다 — 배율이 추가타에도
@@ -5166,9 +5199,9 @@ def simulate(
         # ⬜ 인게임에서 아군이 걸어 준 라이프스틸을 「남이 쓴 회복 효과」로 치는지는 미확인.
         bm.notify("event:heal_received", t, ev.caster, heal_source=ev.caster)
 
-    def _land_boss(ev: HitEvent, t: float) -> None:
+    def _land_boss(ev: HitEvent, t: float) -> bool:
         if boss is not None and not boss.gate(ev):
-            return
+            return False
         result.hits.append(ev)
         result.char_total[ev.caster] += ev.damage
         _apply_lifesteal(ev, bm, base_stats, t)
@@ -5176,7 +5209,7 @@ def simulate(
         # 이미 갈라 갔고 저지원은 총딜 밖이라 여기 오지 않는다 (트로니 · 도로시)
         bm.accumulate_damage(ev.caster, ev.damage, t)
         if boss is None or not (ev.part_damage or ev.interrupt_damage):
-            return
+            return True
         # 좌표 off 다중 타격 — 같은 발이 닿은 파츠마다 히트가 하나씩 더 들어가 총딜에 더해진다. 닿은 저지원은
         # 총딜 밖(`boss.interrupt_dealt`)이라 흡혈만 붙인다 (정본: boss_pattern.py §파츠 다중 타격). 게이트는
         # 본체 히트가 이미 지났다
@@ -5189,6 +5222,7 @@ def simulate(
             bm.accumulate_damage(pev.caster, pev.damage, t)
         for _name in boss.interrupt_hits(ev, t):
             _apply_lifesteal(replace(ev, damage=ev.interrupt_damage), bm, base_stats, t)
+        return True
 
     def _land_target(ev: HitEvent, t: float) -> None:
         """표적에 떨어진 히트(좌표 모드의 착탄 · 좌표 off의 겨눈 발). 게이트(사라짐·속성보호막)는 본체 히트와 같고, **파츠 히트는 총딜에,
@@ -5201,7 +5235,7 @@ def simulate(
             result.char_total[ev.caster] += ev.damage
         _apply_lifesteal(ev, bm, base_stats, t)
 
-    def _land(ev: HitEvent, t: float) -> None:
+    def _land(ev: HitEvent, t: float) -> tuple[str, ...]:
         """히트 하나를 결과에 넣는다. 보스 게이트(사라짐·속성보호막)에 막히면 아무 데도 안 남는다
         — 딜도, 흡혈도, 표적 체력도.
 
@@ -5211,18 +5245,21 @@ def simulate(
         (`boss.aim_of`, boss_pattern.py §조준)."""
         if ev.target:
             _land_target(ev, t)
-            return
+            return ()
         if boss is not None and boss.has_summons and (ev.to is not None or boss.has_adds):
+            landed = []
             for target, w in boss.route(ev, bm.enemy_has_state):
                 part = ev if w == 1.0 else replace(ev, damage=round(ev.damage * w),
                                                    part_damage=round(ev.part_damage * w),
                                                    interrupt_damage=round(ev.interrupt_damage * w))
                 if target == ENEMY:
-                    _land_boss(part, t)
+                    if _land_boss(part, t):
+                        landed.append(target)
                 elif boss.hit_add(part, target, t):
+                    landed.append(target)
                     _apply_lifesteal(part, bm, base_stats, t)
-            return
-        _land_boss(ev, t)
+            return tuple(landed)
+        return (ENEMY,) if _land_boss(ev, t) else ()
 
     squad_order = [c["name"] for c in squad]
 

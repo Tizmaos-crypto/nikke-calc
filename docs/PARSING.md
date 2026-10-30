@@ -572,6 +572,8 @@ template에 timing 키워드 없으면:
 | `기본 버스트 단계가 Step 3인 아군 전체에게` | `"allies_burst3"` |
 | `자신을 제외한 기본 버스트 단계가 Step3인 페르소나 상태 아군 전체에게` | `"allies_burst3_persona_excl_self"` — 페르소나 상태 = `persona_state` 마커 버프 보유 |
 | `[버프명] 상태인 적 전체에게` | `"enemies_with_buff:버프명"` |
+| 해당 상태 적만, 빈 대상도 그대로 유지해야 하는 신규 효과 | `"enemies_with_buff_strict:버프명"` — 마리안 : 퀸 `유사 세계`. 기존 비엄격 필터는 바꾸지 않는다 |
+| named 스킬이 실제 명중한 대상에게 | `"trigger_hit_target"` — 해당 damage에 `hit_target_context:true`. 명중 문맥 없이는 발동 대상을 만들지 않는다 |
 | `[버프명] 상태인 아군 전체에게` | `"allies_with_buff:버프명"` |
 | `[버프명] 상태가 아닌 아군 전체에게` | `"allies_without_buff:버프명"` — 재부여를 막는 대상 필터. **같은 clause에서 그 상태를 부여하는 항목을 배열 뒤로 민다**(부여가 먼저면 뒤 항목의 대상이 0명이 된다 — Step 7 §담체 규칙의 target판) |
 | `해로운 효과 소지 아군 중 무작위 아군 N기에게` | `"allies_random_with_debuff:N"` — harmful 보유자만 거른 뒤 무작위 N기. **시전자를 제외하지 않는다**(제외하는 `allies_random:N`과 다른 키) |
@@ -1205,3 +1207,7 @@ timing: `"passive"`, condition: `["self_hp_above:N"]`.
 ## 12. 니케 목록 및 현황
 
 파싱 진행 현황(완료 / 프리뷰 / 진행 중)은 별도 파일로 분리 → **[`PARSING-CHARS.md`](PARSING-CHARS.md) `## 현황 목록`**. 로스터 전원이 `완료`이고, 새 캐릭터는 파싱이 끝나면 그 파일에 붙인다(§11).
+
+### 임시 명중 해석 옵션 (마리안 : 퀸)
+
+`hit_target_context:true`는 히트별 적 선택을 착탄과 명중 통지 사이에 공유한다. `per_hit_buffs:true`는 순차 공격 중 앞선 명중으로 붙은 버프를 다음 히트가 읽게 한다. `merge_targets:true`는 같은 이름·같은 값의 영구 최대1중첩 상태를 서로 다른 대상 경로로 부여할 때만 쓰며, 같은 대상에게 중복 수치를 더하지 않는다. 기존 효과는 opt-in하지 않아 계산 순서가 바뀌지 않는다. 실측 전 시간 근사는 캐릭터 시나리오를 따른다.
