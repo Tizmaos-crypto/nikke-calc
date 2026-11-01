@@ -216,6 +216,9 @@ _BUFFS_ZERO: dict[str, Any] = {
     "charge_time_flat": 0.0,  # 차지 시간 절대 가감(초). 감소는 음수
     "charge_time_fixed": False,
     "persona_state": False,   # 페르소나 상태 마커. 수치 기여 없이 대상 판정에만 쓴다
+    "engaged_state": False,   # 임전 상태 마커. 같은 꼴 — `self_and_engaged_allies` 판정에만 쓴다
+    # 일반 공격 폭 ▲(%) — 대미지 식에 안 들어간다. 단일 보스 경로에서는 읽는 곳이 없다(홍련 : 신살)
+    "normal_atk_width_pct": 0.0,
     "charge_speed_buff_immune": False,
     "charge_speed_debuff_immune": False,
     "debuff_immune": False,
@@ -290,6 +293,8 @@ _STAT_TO_BUFF: dict[str, str] = {
     "charge_time_flat":     "charge_time_flat",
     "charge_time_fixed":    "charge_time_fixed",
     "persona_state":        "persona_state",
+    "engaged_state":        "engaged_state",
+    "normal_atk_width_pct": "normal_atk_width_pct",
     "charge_speed_buff_immune":  "charge_speed_buff_immune",
     "charge_speed_debuff_immune": "charge_speed_debuff_immune",
     "debuff_immune":        "debuff_immune",
@@ -333,6 +338,7 @@ _DIRECT_READ_STATS = frozenset([
     "invincible", "undying", "stealth", "cover_disabled",   # has_live_stat()
     "shield_invincible",     # has_live_stat() — absorb_shield()가 보호막의 시전자를 본다
     "received_dmg_split_even",   # split_group() — 보스 공격 한 발을 집단이 나눠 진다
+    "hp_only_caster_based_pct",  # effective_max_hp() — 렐릭 베젤 큐브
 ])
 
 # 크리확률로 합산되는 stat 집합 (백분율 → 확률 환산 후 기본 15%와 합연산)
@@ -438,6 +444,7 @@ _BOOL_BUFF_KEYS = frozenset([
     "charge_time_fixed", "charge_speed_buff_immune", "charge_speed_debuff_immune",
     "debuff_immune", "stun_immune", "stack_change_immune", "taunt",
     "pierce_enabled", "infinite_ammo", "armor_break_enabled", "persona_state",
+    "engaged_state",
 ])
 
 # get_buffs 실행 계획의 스텝 종류 (`BuffManager._build_plan` 참고)
@@ -471,6 +478,8 @@ _DECOY_STATS = frozenset(["decoy"])
 # 이 집합에 포함된 조건이 하나라도 있으면 ActiveBuff.has_runtime_conditions = True
 _RUNTIME_COND_PREFIXES = frozenset([
     "during_charge", "during_full_burst", "not_during_full_burst",
+    # 「풀 차지 상태일 때 한하여」 — 풀차지 도달(래치) ~ 발사 사이만 참(라푼젤 : 생츄어리)
+    "during_full_charge",
     "during_shield",
     "self_hp_above:", "self_hp_below:", "self_hp_max",
     "ally_hp_below:",
@@ -794,6 +803,9 @@ class BuffManager:
         # `scaling: "max_ammo_count"`(「최종 최대 장탄 수 1발 당」)가 읽는다(`_scale_by_max_ammo`).
         # 최대 장탄은 타임라인이 들고 있어 여기서 직접 셀 수 없다
         self.max_ammo_provider: Any = None
+        # 니케가 지금 풀차지 상태(도달 래치 ~ 발사)인가를 묻는 콜백 `(이름) → bool` — 타임라인이 넣는다.
+        # `during_full_charge`가 읽는다. 차지 상태는 타임라인 `CharState`가 들고 있어 여기서 셀 수 없다
+        self.full_charge_provider: Any = None
         # 위 콜백이 다시 `get_buffs`를 부르는 동안의 수령자 — 재귀 차단용(`_scale_by_max_ammo`)
         self._ammo_query: set[str] = set()
 
@@ -1035,7 +1047,7 @@ class BuffManager:
         `unsupported`가 달린 항목(계산기 미구현 stat·조건부 발동)은 등록하지 않는다.
         `cube.json`이 데이터는 다 갖고 있되 엔진이 못 다루는 것을 명시한 표시다.
 
-        엔트리의 `type`·`timing`을 그대로 따른다. 없으면 `battle_start` 상시 버프다 —
+        엔트리의 `type`·`timing`·`max_stack`을 그대로 따른다. 없으면 `battle_start` 상시 버프다 —
         대부분의 큐브가 그렇지만, 택티컬 베어 큐브(10발 사격 시 탄환 충전)처럼
         `type: instant` + 트리거 타이밍으로 오는 것도 있다. instant는 duration이 없다
         (`parsed_skills.json`의 instant와 같은 모양이어야 타임라인 핸들러가 받는다).
@@ -1074,6 +1086,9 @@ class BuffManager:
             if eff["type"] == "buff":
                 eff["polarity"] = "beneficial"
                 eff["duration"] = None
+                # 전투 시작이 아닌 트리거로 쌓이는 큐브(렐릭 베젤 큐브 — 풀 버스트 시작마다 1중첩)
+                if entry.get("max_stack"):
+                    eff["max_stack"] = entry["max_stack"]
             effects.append(eff)
         return effects
 
@@ -2065,6 +2080,17 @@ class BuffManager:
             if cond == "during_charge":
                 if not self.state.get("charging", {}).get(caster):
                     return False
+            elif cond == "during_full_charge":
+                if not self._is_full_charged(caster):
+                    return False
+            elif cond.startswith("ally_down_count_above:"):
+                # 「전투 불능 아군이 N기 이상이라면」 — 지금 쓰러져 있는 스쿼드원 수
+                if len(self.state.get("down") or ()) < int(cond.split(":")[1]):
+                    return False
+            elif cond.startswith("ally_down_count_below:"):
+                # 「전투 불능 아군이 N기 이하라면」 — 0기(아무도 안 쓰러짐)도 포함(유저 확인 2026-11-01)
+                if len(self.state.get("down") or ()) > int(cond.split(":")[1]):
+                    return False
             elif cond == "during_full_burst":
                 if not self.state.get("full_burst"):
                     return False
@@ -2404,6 +2430,18 @@ class BuffManager:
         """
         pinned = (self._char.get(name) or {}).get("burst_stage")
         return str(pinned or _NIKKE.get(name, {}).get("burst_stage", ""))
+
+    def _is_full_charged(self, name: str) -> bool:
+        """풀차지 도달 후 아직 발사하지 않았는가 — `during_full_charge`. 콜백이 없으면(타임라인 밖) 거짓."""
+        return bool(self.full_charge_provider and self.full_charge_provider(name))
+
+    def _has_engaged_state(self, name: str) -> bool:
+        """`engaged_state` 마커 버프 보유 여부 — 「임전 상태인 아군」(`self_and_engaged_allies`) 판정용.
+        상태 이름이 캐릭터마다 달라(`임전 : 명경지수`·`임전 : 의지를 벼린 창끝` …) stat으로 판정한다."""
+        return any(
+            ab.effect.get("stat") == "engaged_state" and name in (ab.target_chars or [])
+            for ab in self._active
+        )
 
     def _has_persona_state(self, name: str) -> bool:
         """`persona_state` 마커 버프 보유 여부 — `allies_burst3_persona_excl_self` 판정용."""
@@ -4856,6 +4894,9 @@ class BuffManager:
             if cond == "during_charge":
                 if not self.state.get("charging", {}).get(buff_caster):
                     return False
+            elif cond == "during_full_charge":
+                if not self._is_full_charged(buff_caster):
+                    return False
             elif cond == "during_full_burst":
                 if not self.state.get("full_burst"):
                     return False
@@ -5195,6 +5236,11 @@ class BuffManager:
         # 후보가 N보다 적으면 있는 만큼·0기면 빈 목록이다.
         # 아군은 보스 공격 패턴이 있을 때만 쓰러지므로 기본 경로에서는 늘 0기다.
         # (앤 : 미라클 페어리 `파란 나비의 꿈 3` — `revive`의 대상)
+        # "전투 불능 상태 아군 전체" — 쓰러진 스쿼드원 전원. `allies_down_` 접두사라 전투불능 제외 규칙에서
+        # 함께 빠진다. 기본 경로에서는 늘 0기다(라푼젤 : 생츄어리 `나노 입자 투여` — `revive`의 대상)
+        if target == "allies_down_all":
+            down = self.state.get("down") or ()
+            return [x for x in self.squad_names if x in down]
         if target.startswith("allies_down_class_random:"):
             _, cls, n_raw = target.split(":")
             down = self.state.get("down") or ()
@@ -5350,6 +5396,10 @@ class BuffManager:
         # "자신을 제외한 기본 버스트 단계 Step3인 페르소나 상태 아군 전체".
         # 페르소나 상태 = persona_state 마커 버프 보유. allies_with_buff:와 달리
         # 버프 이름이 캐릭터마다 다르므로(요한나/코노하나사쿠야) stat으로 판정한다.
+        # "자신과 임전 상태인 아군 전체" — 시전자 ∪ engaged_state 마커 보유 아군. 부여 시점 스냅샷
+        # (allies_with_buff:와 같다). 라푼젤 : 생츄어리 `디바인 라이트 2`·`셀레스티얼 헤이븐 2`
+        if target == "self_and_engaged_allies":
+            return [n for n in self.squad_names if n == caster or self._has_engaged_state(n)]
         if target == "allies_burst3_persona_excl_self":
             return [n for n in self.squad_names
                     if n != caster and self._innate_burst_stage(n) == "3" and self._has_persona_state(n)]

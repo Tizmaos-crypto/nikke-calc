@@ -47871,10 +47871,11 @@
         "condition": []
       },
       "target": "self",
-      "polarity": "neutral",
+      "polarity": "beneficial",
       "max_stack": 1,
       "duration": -1,
-      "note": "전투 시작 시부터 유지되는 순수 상태 담체. 실제 반복 피해는 다크 매터 창의 타이머를 사용한다."
+      "note": "임전 상태 마커. 원문 `■ 전투 시작 시 자신에게 [임전 : 의지를 벼린 창끝]` — 유지 시간 표기가 없어 영구(-1)이고 `[해제 불가]` 표기도 없어 `beneficial`이다. 수치 없이 「임전 상태인 아군」 판정(라푼젤 : 생츄어리 `self_and_engaged_allies`)에만 쓴다 — `persona_state`와 같은 꼴(부모 세션 공통 규약, 홍련 : 신살 · 라푼젤 : 생츄어리와 동시 등록). `반복 주기 : 4초`는 상태가 아니라 하위 기능(다크 매터 창 발사)의 주기라 이 마커에는 `every:`를 붙이지 않는다 — 상태 자체가 영구라 다시 걸 일이 없다(엠마 : 택티컬 업 `환경 조성`은 상태가 10초라 마커도 주기를 돌았다)",
+      "stat": "engaged_state"
     },
     {
       "source": "스킬1",
@@ -47978,10 +47979,11 @@
         "condition": []
       },
       "target": "self",
-      "polarity": "neutral",
+      "polarity": "beneficial",
       "max_stack": 1,
       "duration": 10,
-      "note": "본인 버스트로 켜지는 10초 상태 담체. 일반 공격 카운터는 기존 전투 누적 카운터를 따르며 상태가 피해 발동만 제한한다."
+      "note": "임전 상태 마커이자 상태명 `임전 : 파고드는 소망`의 담체(PARSING Step 7 §상태의 담체). 원문 `■ 버스트 스킬 사용 시 자신에게 [임전 : 파고드는 소망] … 유지 시간 : 10초`. 같은 clause의 `효과 1`(대미지)·`효과 2`(주기 단축)는 이름이 없어 clause 머리 이름에 번호를 붙인다. 스킬2 clause 2·3의 `self_state:`·`not_self_state:`와 효과 1의 `self_state:`가 이 이름을 읽는다",
+      "stat": "engaged_state"
     },
     {
       "source": "스킬2",
@@ -48213,6 +48215,760 @@
         "9": 1285.2,
         "10": 1346.4
       }
+    }
+  ],
+  "라푼젤 : 생츄어리": [
+    {
+      "source": "스킬1",
+      "type": "instant",
+      "name": "디바인 라이트",
+      "trigger": {
+        "timing": [
+          "full_charge_fire"
+        ],
+        "condition": []
+      },
+      "target": "all_allies",
+      "stat": "heal_hp_pct",
+      "scaling": "max_hp",
+      "values": {
+        "1": 2.3,
+        "2": 2.48,
+        "3": 2.66,
+        "4": 2.83,
+        "5": 3.01,
+        "6": 3.19,
+        "7": 3.37,
+        "8": 3.54,
+        "9": 3.72,
+        "10": 3.9
+      }
+    },
+    {
+      "source": "스킬1",
+      "type": "buff",
+      "name": "디바인 라이트 2",
+      "trigger": {
+        "timing": [
+          "full_burst_start"
+        ],
+        "condition": []
+      },
+      "target": "self_and_engaged_allies",
+      "stat": "atk_dmg_pct",
+      "polarity": "beneficial",
+      "max_stack": 1,
+      "values": {
+        "1": 16.22,
+        "2": 17.47,
+        "3": 18.72,
+        "4": 19.96,
+        "5": 21.21,
+        "6": 22.46,
+        "7": 23.71,
+        "8": 24.96,
+        "9": 26.2,
+        "10": 27.45
+      },
+      "duration": 10.0,
+      "note": "「자신과 임전 상태인 아군 전체에게」 — 신설 target `self_and_engaged_allies`(자신 ∪ `engaged_state` 마커 버프 보유 아군, 부여 시점 스냅샷). 임전 상태는 마리안 : 퀸 · 홍련 : 신살이 스스로에게 거는 상태라 둘이 없는 스쿼드에서는 자신에게만 걸린다"
+    },
+    {
+      "source": "스킬1",
+      "type": "instant",
+      "name": "디바인 라이트 3",
+      "trigger": {
+        "timing": [
+          "event:나노 입자 투여"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "burst_cooldown_reduce",
+      "fixed_value": -40.0,
+      "note": "「[버스트 스킬 재사용 시간 40초 ▲] [해제 불가]」 — 유지 블록이 없는 재사용 시간 증가는 즉시 1회 instant의 음수다(선례 프리카 `앵콜 3` −21). `[해제 불가]`는 instant에 담을 필드가 없다. 트리거 「나노 입자 투여 사용 시」는 스킬3 `나노 입자 투여`(부활 instant)가 발동하는 순간 — 「[스킬명] 발동 시」 → `event:[이름]`(레드 후드 `와일드 투스 4`)과 같은 키"
+    },
+    {
+      "source": "스킬1",
+      "type": "buff",
+      "name": "나노 입자 소모",
+      "trigger": {
+        "timing": [
+          "event:나노 입자 투여"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "def_pct",
+      "polarity": "beneficial_irremovable",
+      "max_stack": 1,
+      "values": {
+        "1": 5.91,
+        "2": 6.36,
+        "3": 6.82,
+        "4": 7.27,
+        "5": 7.73,
+        "6": 8.18,
+        "7": 8.64,
+        "8": 9.09,
+        "9": 9.55,
+        "10": 10.0
+      },
+      "duration": -1,
+      "persist_on_revive": true,
+      "note": "스킬3의 두 분기(`not_self_state:나노 입자 소모` / `self_state:나노 입자 소모`)를 가르는 상태의 담체. `[부활 시 유지]` → `persist_on_revive`(디젤 : 윈터 스위츠 `인트로`·`클라이막스` 선례)"
+    },
+    {
+      "source": "스킬1",
+      "type": "buff",
+      "name": "디바인 라이트 4",
+      "trigger": {
+        "timing": [
+          "full_charge"
+        ],
+        "condition": [
+          "during_full_charge"
+        ]
+      },
+      "target": "self",
+      "stat": "charge_speed_buff_immune",
+      "polarity": "neutral",
+      "max_stack": 1,
+      "duration": -1,
+      "note": "「풀 차지 시 자신이 풀 차지 상태일 때 한하여」 — 신설 condition `during_full_charge`(풀 차지에 도달해 아직 발사하지 않은 동안 참, 런타임 재평가). `[지속]`이지만 「~일 때 한하여」라 발사로 풀 차지 상태가 끝나면 꺼진다. 면역 stat의 polarity는 리버렐리오 `차지 속도 증가 효과 면역`(neutral) 선례. 풀 차지에 이미 도달한 뒤라 차지 속도는 그 차지에 영향이 없다 — 딜 0"
+    },
+    {
+      "source": "스킬1",
+      "type": "buff",
+      "name": "디바인 라이트 5",
+      "trigger": {
+        "timing": [
+          "full_charge"
+        ],
+        "condition": [
+          "during_full_charge"
+        ]
+      },
+      "target": "self",
+      "stat": "charge_speed_debuff_immune",
+      "polarity": "neutral",
+      "max_stack": 1,
+      "duration": -1
+    },
+    {
+      "source": "스킬2",
+      "type": "buff",
+      "name": "셀레스티얼 헤이븐",
+      "trigger": {
+        "timing": [
+          "charge_hold:1"
+        ],
+        "condition": [
+          "not_self_state:갓데스 블레싱"
+        ]
+      },
+      "target": "self",
+      "stat": "shared_shield_from_max_hp_pct",
+      "polarity": "beneficial",
+      "max_stack": 1,
+      "values": {
+        "1": 4.36,
+        "2": 4.7,
+        "3": 5.04,
+        "4": 5.37,
+        "5": 5.71,
+        "6": 6.04,
+        "7": 6.38,
+        "8": 6.72,
+        "9": 7.05,
+        "10": 7.39
+      },
+      "duration": -1,
+      "note": "`공용 보호막` → `shared_shield_from_max_hp_pct` · 대상 `self`(라푼젤 : 퓨어 그레이스 `생츄어리` 선례). `[차지 종료 시 제거]` → `duration: -1` + `full_charge_fire` 트리거의 `셀레스티얼 헤이븐 해제`(`[마지막 탄환 공격 시 제거]` 신데렐라 : 크리스탈 웨이브 `변경 준비 해제`와 같은 꼴). 풀 차지를 1초 넘게 든 차지는 풀 차지 발사로만 끝나므로 「차지 종료」를 그 발사로 읽었다"
+    },
+    {
+      "source": "스킬2",
+      "type": "instant",
+      "name": "셀레스티얼 헤이븐 해제",
+      "trigger": {
+        "timing": [
+          "full_charge_fire"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "remove_named_buff",
+      "target_effect": "셀레스티얼 헤이븐"
+    },
+    {
+      "source": "스킬2",
+      "type": "buff",
+      "name": "갓데스 블레싱",
+      "trigger": {
+        "timing": [
+          "charge_hold:1"
+        ],
+        "condition": [
+          "not_self_state:갓데스 블레싱"
+        ]
+      },
+      "target": "all_allies",
+      "stat": "def_caster_based_pct",
+      "polarity": "beneficial",
+      "max_stack": 1,
+      "values": {
+        "1": 24.96,
+        "2": 26.88,
+        "3": 28.8,
+        "4": 30.72,
+        "5": 32.64,
+        "6": 34.56,
+        "7": 36.48,
+        "8": 38.4,
+        "9": 40.32,
+        "10": 42.24
+      },
+      "duration": 10.0,
+      "note": "재부여 게이트 `not_self_state:갓데스 블레싱`의 담체 — 같은 게이트를 쓰는 보호막(`셀레스티얼 헤이븐`)보다 뒤에 둔다(PARSING Step 7 §담체를 배열 끝에)"
+    },
+    {
+      "source": "스킬2",
+      "type": "buff",
+      "name": "셀레스티얼 헤이븐 2",
+      "trigger": {
+        "timing": [
+          "full_burst_start"
+        ],
+        "condition": []
+      },
+      "target": "self_and_engaged_allies",
+      "stat": "atk_caster_based_pct",
+      "polarity": "beneficial",
+      "max_stack": 1,
+      "values": {
+        "1": 17.23,
+        "2": 18.56,
+        "3": 19.89,
+        "4": 21.21,
+        "5": 22.54,
+        "6": 23.86,
+        "7": 25.19,
+        "8": 26.52,
+        "9": 27.84,
+        "10": 29.17
+      },
+      "duration": 10.0
+    },
+    {
+      "source": "스킬2",
+      "type": "damage",
+      "name": "셀레스티얼 헤이븐 3",
+      "trigger": {
+        "timing": [
+          "full_charge_fire"
+        ],
+        "condition": []
+      },
+      "target": "enemies_nearest:1",
+      "stat": "bonus_damage",
+      "values": {
+        "1": 130.41,
+        "2": 140.44,
+        "3": 150.48,
+        "4": 160.51,
+        "5": 170.54,
+        "6": 180.57,
+        "7": 190.6,
+        "8": 200.64,
+        "9": 210.67,
+        "10": 220.7
+      }
+    },
+    {
+      "source": "스킬3",
+      "type": "buff",
+      "name": "가든 오브 아르카디아 3",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": [
+          "not_self_state:나노 입자 소모",
+          "ally_down_count_below:2"
+        ]
+      },
+      "target": "all_allies",
+      "stat": "atk_caster_based_pct",
+      "polarity": "beneficial",
+      "max_stack": 1,
+      "values": {
+        "1": 20.59,
+        "2": 22.17,
+        "3": 23.76,
+        "4": 25.34,
+        "5": 26.92,
+        "6": 28.51,
+        "7": 30.09,
+        "8": 31.68,
+        "9": 33.26,
+        "10": 34.84
+      },
+      "duration": 10.0,
+      "note": "**스킬3의 배열 순서는 원문과 다르다(이름 번호는 원문 순서)** — 게임은 시전 순간에 분기를 한 번에 정하는데 계산기는 효과마다 그 자리에서 판정한다. 상태를 바꾸는 부활(`나노 입자 투여`)이 먼저 돌면 전투불능 수가 0으로 내려가 「2기 이하」가, 부활이 일으키는 `나노 입자 소모`(스킬1) 때문에 「나노 입자 소모 상태라면」이 같은 시전에서 함께 참이 된다. 그래서 부활을 맨 뒤로 보냈다(릴리 `최고의 엔지니어!` 선례) / 「[전투 불능 아군 수량 별 효과] [해당되는 효과만 적용]」 분기 메타 블록은 항목을 만들지 않고 하위 조건을 condition으로 옮겼다(라피 : 레드 후드 `[스쿼드 구성 별 효과]` 선례). 「전투 불능 아군이 2기 이하라면」 → 신설 `ally_down_count_below:2`(0기 포함). 보스 공격 패턴이 없으면 늘 참 — 기본 경로에서 스킬3이 내는 것은 이 항목 하나다"
+    },
+    {
+      "source": "스킬3",
+      "type": "buff",
+      "name": "가든 오브 아르카디아 4",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": [
+          "self_state:나노 입자 소모"
+        ]
+      },
+      "target": "all_allies",
+      "stat": "atk_caster_based_pct",
+      "polarity": "beneficial",
+      "max_stack": 1,
+      "values": {
+        "1": 20.59,
+        "2": 22.17,
+        "3": 23.76,
+        "4": 25.34,
+        "5": 26.92,
+        "6": 28.51,
+        "7": 30.09,
+        "8": 31.68,
+        "9": 33.26,
+        "10": 34.84
+      },
+      "duration": 10.0
+    },
+    {
+      "source": "스킬3",
+      "type": "buff",
+      "name": "가든 오브 아르카디아",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": [
+          "not_self_state:나노 입자 소모",
+          "ally_down_count_above:3"
+        ]
+      },
+      "target": "allies_down_all",
+      "stat": "atk_caster_based_pct",
+      "polarity": "beneficial",
+      "max_stack": 1,
+      "values": {
+        "1": 59.9,
+        "2": 64.51,
+        "3": 69.12,
+        "4": 73.72,
+        "5": 78.33,
+        "6": 82.94,
+        "7": 87.55,
+        "8": 92.16,
+        "9": 96.76,
+        "10": 101.37
+      },
+      "duration": 10.0,
+      "max_trigger": 1,
+      "note": "「전투 불능 상태인 아군이 3기 이상이라면 전투 불능 상태 아군 전체에게」 → 신설 condition `ally_down_count_above:3` · 신설 target `allies_down_all`. 부활과 같은 대상에게 가는 버프라 부활보다 **앞**에 둬 시전 직전 상태로 대상을 고른다(릴리 `최고의 엔지니어! 2` 선례)"
+    },
+    {
+      "source": "스킬3",
+      "type": "buff",
+      "name": "가든 오브 아르카디아 2",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": [
+          "not_self_state:나노 입자 소모",
+          "ally_down_count_above:3"
+        ]
+      },
+      "target": "allies_down_all",
+      "stat": "def_caster_based_pct",
+      "polarity": "beneficial",
+      "max_stack": 1,
+      "values": {
+        "1": 131.04,
+        "2": 141.12,
+        "3": 151.2,
+        "4": 161.28,
+        "5": 171.36,
+        "6": 181.44,
+        "7": 191.52,
+        "8": 201.6,
+        "9": 211.68,
+        "10": 221.76
+      },
+      "duration": 10.0,
+      "max_trigger": 1
+    },
+    {
+      "source": "스킬3",
+      "type": "instant",
+      "name": "나노 입자 투여",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": [
+          "not_self_state:나노 입자 소모",
+          "ally_down_count_above:3"
+        ]
+      },
+      "target": "allies_down_all",
+      "stat": "revive",
+      "values": {
+        "1": 56.72,
+        "2": 61.09,
+        "3": 65.45,
+        "4": 69.82,
+        "5": 74.18,
+        "6": 78.54,
+        "7": 82.91,
+        "8": 87.27,
+        "9": 91.63,
+        "10": 96.0
+      },
+      "max_trigger": 1,
+      "note": "`[나노 입자 투여 : 체력 N%로 부활] [전투 중 1회 발동]` → `revive`(마나 `매터 감마 3` 선례) + `max_trigger: 1`. 이 효과의 발동이 스킬1 「나노 입자 투여 사용 시」(`event:나노 입자 투여`)를 연다 — 배열 맨 뒤(`가든 오브 아르카디아 3` note)"
+    }
+  ],
+  "홍련 : 신살": [
+    {
+      "source": "스킬1",
+      "type": "buff",
+      "name": "임전 : 명경지수",
+      "trigger": {
+        "timing": [
+          "battle_start"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "engaged_state",
+      "polarity": "beneficial_irremovable",
+      "max_stack": 1,
+      "duration": -1,
+      "note": "임전 상태 마커"
+    },
+    {
+      "source": "스킬1",
+      "type": "buff",
+      "name": "임전 : 명경지수 2",
+      "trigger": {
+        "timing": [
+          "battle_start"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "pierce_enabled",
+      "polarity": "beneficial_irremovable",
+      "max_stack": 1,
+      "duration": -1,
+      "note": "효과 1 `[관통 특화] [지속] [해제 불가]`. 「기능 : 일반 공격이 넓은 폭의 관통 공격으로 발사」의 관통이 이것이다"
+    },
+    {
+      "source": "스킬1",
+      "type": "buff",
+      "name": "임전 : 명경지수 3",
+      "trigger": {
+        "timing": [
+          "battle_start"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "normal_atk_crit_rate",
+      "polarity": "beneficial_irremovable",
+      "max_stack": 1,
+      "values": {
+        "1": 20.68,
+        "2": 22.27,
+        "3": 23.86,
+        "4": 25.45,
+        "5": 27.04,
+        "6": 28.63,
+        "7": 30.22,
+        "8": 31.81,
+        "9": 33.4,
+        "10": 35.0
+      },
+      "duration": -1
+    },
+    {
+      "source": "스킬1",
+      "type": "damage",
+      "name": "거합",
+      "trigger": {
+        "timing": [
+          "on_attack"
+        ],
+        "condition": [
+          "self_state:임전 : 명경지수"
+        ]
+      },
+      "target": "enemies_nearest:1",
+      "stat": "bonus_damage",
+      "values": {
+        "1": 54.5,
+        "2": 60.56,
+        "3": 66.62,
+        "4": 72.68,
+        "5": 78.74,
+        "6": 84.8,
+        "7": 90.86,
+        "8": 96.92,
+        "9": 102.98,
+        "10": 109.0
+      },
+      "note": "효과 3 `일반 공격 시 조준선에 가장 가까운 적 1기에게 [거합 : 최종 공격력 N% 추가 대미지]`. 상태 하위 효과가 자기 트리거를 가지면 그 트리거 + `self_state:[상태]`(선례 길티 : 마이티 바니 `체인 인헨스 3`). 「일반 공격 시」 = 발사(`on_attack`, PARSING §4-1). 무기 변경 모드 사격도 일반 공격이라 발동한다(GAMEPLAY §무기 메카닉). 스킬2 `임전 : 신검합일 4`가 `target_effect`로 이 이름을 읽는다"
+    },
+    {
+      "source": "스킬1",
+      "type": "buff",
+      "name": "화무십일일홍 · 개화",
+      "trigger": {
+        "timing": [
+          "full_burst_start"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "crit_dmg",
+      "polarity": "beneficial",
+      "max_stack": 1,
+      "values": {
+        "1": 33.0,
+        "2": 36.0,
+        "3": 39.0,
+        "4": 42.0,
+        "5": 45.0,
+        "6": 48.0,
+        "7": 51.0,
+        "8": 54.0,
+        "9": 57.0,
+        "10": 60.0
+      },
+      "duration": 10.0
+    },
+    {
+      "source": "스킬2",
+      "type": "instant",
+      "name": "화무십일일홍 · 난무",
+      "trigger": {
+        "timing": [
+          "crit_hit_count:2"
+        ],
+        "condition": [
+          "not_self_state:화무십일일홍 · 만개"
+        ]
+      },
+      "target": "self",
+      "stat": "ammo_charge_flat",
+      "fixed_value": 1.0,
+      "note": "`화무십일일홍 · 만개`는 스킬3 무기 변경 모드 이름 — `not_self_state:`는 모드명도 본다(`_has_self_state`). 무기 변경 중 탄환 충전 미적용(GAMEPLAY §무기 메카닉)과 같은 방향이라 조건이 없어도 결과는 같다"
+    },
+    {
+      "source": "스킬2",
+      "type": "buff",
+      "name": "임전 : 신검합일",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "engaged_state",
+      "polarity": "beneficial_irremovable",
+      "max_stack": 1,
+      "duration": 10.0,
+      "note": "임전 상태 마커"
+    },
+    {
+      "source": "스킬2",
+      "type": "buff",
+      "name": "임전 : 신검합일 2",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "normal_atk_crit_rate",
+      "polarity": "beneficial_irremovable",
+      "max_stack": 1,
+      "values": {
+        "1": 29.54,
+        "2": 31.81,
+        "3": 34.08,
+        "4": 36.35,
+        "5": 38.62,
+        "6": 40.89,
+        "7": 43.16,
+        "8": 45.43,
+        "9": 47.7,
+        "10": 50.0
+      },
+      "duration": 10.0
+    },
+    {
+      "source": "스킬2",
+      "type": "buff",
+      "name": "임전 : 신검합일 3",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "atk_dmg_pct",
+      "polarity": "beneficial_irremovable",
+      "max_stack": 1,
+      "values": {
+        "1": 58.0,
+        "2": 64.44,
+        "3": 70.88,
+        "4": 77.32,
+        "5": 83.76,
+        "6": 90.2,
+        "7": 96.64,
+        "8": 103.08,
+        "9": 109.52,
+        "10": 116.0
+      },
+      "duration": 10.0
+    },
+    {
+      "source": "스킬2",
+      "type": "buff",
+      "name": "임전 : 신검합일 4",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "dmg_scale_mag_pct",
+      "polarity": "beneficial_irremovable",
+      "max_stack": 1,
+      "fixed_value": 100.0,
+      "target_effect": "거합",
+      "duration": 10.0,
+      "note": "효과 3 `[거합 추가 대미지 배율이 100% 증가 상태로 변경]` — 거합 계수 ×(1 + 100/100). 선례 이브 `엑소스파인 Mk2`(`불안정 에너지 순차 공격 대미지 배율이 100% 증가 상태로 변경` → `dmg_scale_mag_pct` 100)"
+    },
+    {
+      "source": "스킬3",
+      "type": "weapon_change",
+      "name": "화무십일일홍 · 만개",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "weapon_type": "AR",
+      "damage_coeff": {
+        "1": 107.57,
+        "2": 108.4,
+        "3": 109.22,
+        "4": 110.05,
+        "5": 110.87,
+        "6": 111.7,
+        "7": 112.52,
+        "8": 113.35,
+        "9": 114.17,
+        "10": 115.0
+      },
+      "max_ammo": 999,
+      "duration": 10.0,
+      "note": "원문에 변경 무기 유형·연사·장탄 표기가 없다(PARSING §10-7). 무기 유형은 기본 무기 AR — 선례 네온 : 블루 오션 `풀 하이드로 샷`(유저 지시 「무기 정보는 기본 CDN 데이터 따라」) · 모더니아 `섬멸 모드`. 연사는 CDN `weapon_change_fire_rate.스킬3` 1.5/s(90rpm)라 `fire_rate`를 적지 않는다(PARSING §2). 장탄은 원문에 없어 유저 확인값 999발(2026-11-01 — 「변경 후 999발, AR 유지」). 연사도 유저 체감 「10초에 15발 정도」가 CDN 90rpm = 1.5/s와 맞아 CDN을 쓴다. 코어 배율은 생략 → 기본 무기 200%"
+    },
+    {
+      "source": "스킬3",
+      "type": "buff",
+      "name": "화무십일일홍 · 신살",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "normal_atk_width_pct",
+      "polarity": "beneficial_irremovable",
+      "max_stack": 1,
+      "fixed_value": 100.0,
+      "duration": 10.0,
+      "note": "추가 효과 1 `[일반 공격 폭 100% ▲] [10초 유지] [해제 불가]` — 로스터 최초 문구라 신규 키(❌). 스킬1 「넓은 폭의 관통 공격」의 폭을 넓힌다는 뜻으로 읽히지만 원문이 `관통 범위 N% 확장`(`pierce_range`)과 달라 접지 않았다. 단일 보스 기본 경로에서는 딜 영향 0"
+    },
+    {
+      "source": "스킬3",
+      "type": "buff",
+      "name": "화무십일일홍 · 신살 2",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": []
+      },
+      "target": "self",
+      "stat": "atk_pct",
+      "polarity": "beneficial_irremovable",
+      "max_stack": 1,
+      "values": {
+        "1": 66.0,
+        "2": 72.0,
+        "3": 78.0,
+        "4": 84.0,
+        "5": 90.0,
+        "6": 96.0,
+        "7": 102.0,
+        "8": 108.0,
+        "9": 114.0,
+        "10": 120.0
+      },
+      "duration": 10.0
+    },
+    {
+      "source": "스킬3",
+      "type": "damage",
+      "name": "화무십일일홍 · 신살 3",
+      "trigger": {
+        "timing": [
+          "burst_cast"
+        ],
+        "condition": []
+      },
+      "target": "enemies_nearest:1",
+      "stat": "bonus_damage",
+      "values": {
+        "1": 1649.98,
+        "2": 1799.98,
+        "3": 1949.98,
+        "4": 2099.98,
+        "5": 2249.98,
+        "6": 2399.98,
+        "7": 2549.98,
+        "8": 2699.98,
+        "9": 2849.98,
+        "10": 3000.0
+      },
+      "note": "timing 없는 clause라 스킬3 기본 `burst_cast`(PARSING §3 Step 3). B3 `bonus_damage`라 풀버스트 시작까지 보류된다(IMPL-STATUS `bonus_damage`). 대상 선례 라피 : 레드 후드 `계승되는 힘 4`"
     }
   ]
 }

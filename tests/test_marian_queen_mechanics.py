@@ -138,6 +138,16 @@ class QueenBuffManager(unittest.TestCase):
         self.bm.register_damage_handler(lambda eff, caster, t: self.damage.append((eff["name"], t)))
         self.bm.notify("battle_start", 0, QUEEN)
 
+    def test_upstream_engaged_target_includes_queen_but_not_unengaged_ally(self):
+        caster = "라푼젤 : 생츄어리"
+        bm = BuffManager(spec.build_squad([caster, QUEEN, "크라운"]))
+        self.assertEqual(bm._resolve_target("self_and_engaged_allies", caster), [caster])
+        bm.notify("battle_start", 0, QUEEN)
+        self.assertEqual(bm._resolve_target("self_and_engaged_allies", caster), [caster, QUEEN])
+        bm.notify("burst_cast", 1, QUEEN)
+        bm.tick(12)
+        self.assertEqual(bm._resolve_target("self_and_engaged_allies", caster), [caster, QUEEN])
+
     def test_missing_hit_context_never_wounds_all_enemies(self):
         self.bm.notify(f"hit_count:{SPEAR}", .1, QUEEN)
         self.assertFalse(self.bm.enemy_has_state("__enemy__", WOUND))
