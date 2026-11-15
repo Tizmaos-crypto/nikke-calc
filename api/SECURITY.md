@@ -6,6 +6,9 @@ The CLI's local profile workflow remains unchanged. API request files contain
 an inline profile object, use private OS temporary files, and are removed after
 success, validation failure or timeout. They never use the personal `profiles/`
 directory. Abrupt process/host termination can leave OS temp files behind.
+Legacy web/collector gear `_track` display labels are removed from a copy before
+validation. All calculation fields and validation of other unknown keys remain
+unchanged; the submitted profile is not mutated.
 
 `RequestLimits` caps `/simulate` and `/dildoro/boss` together at two active
 requests and 120 accepted starts per rolling minute per API process. It rejects

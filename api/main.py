@@ -13,6 +13,7 @@ Render 배포는 render.yaml 참고.
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
 import os
 import re
@@ -231,6 +232,17 @@ def _build_cmd(req: SimRequest, profile_name_override: Optional[str] = None) -> 
 
 def _write_temp_profile(profile_data: dict) -> tuple[str, Path]:
     """Transport an inline profile in a private OS temp file, never profiles/."""
+    # Older web/collector clients attach a display-only gear label. The calculator
+    # never consumes it; remove only this known label before strict validation.
+    profile_data = copy.deepcopy(profile_data)
+    chars = profile_data.get("chars")
+    if isinstance(chars, dict):
+        for entry in chars.values():
+            gear = entry.get("equipment") if isinstance(entry, dict) else None
+            if isinstance(gear, dict):
+                for part in gear.values():
+                    if isinstance(part, dict):
+                        part.pop("_track", None)
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", prefix="nikke-request-",
                                      encoding="utf-8", delete=False) as handle:
         path = Path(handle.name)

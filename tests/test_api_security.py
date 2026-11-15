@@ -1,5 +1,6 @@
 """Security boundary tests, no production requests or personal profiles."""
 import asyncio
+import copy
 import json
 from pathlib import Path
 import subprocess
@@ -17,6 +18,46 @@ except ImportError:
 
 @unittest.skipIf(TestClient is None, "Optional API dependencies are not installed")
 class ApiSecurity(unittest.TestCase):
+    def test_legacy_gear_labels_preserve_all_stats_and_calculation(self):
+        equipment = {
+            "머리": {"level": 5, "_track": "오버로드"},
+            "몸통": {"tier": "T9", "level": 3, "corp": "미실리스", "_track": "T9"},
+            "팔": {"tier": "T8", "level": 2},
+            "다리": {"tier": "없음"},
+        }
+        profile = {"base": "default", "chars": {"리타": {
+            "equipment": equipment,
+            "equip_skills": {"atk_pct": 11.81, "max_ammo_pct": [68.93]},
+            "skill_levels": {"1": 7, "2": 8, "3": 9},
+            "collection_stage": "SR15", "favorite_stage": 0,
+        }}}
+        original = copy.deepcopy(profile)
+        from api.main import _write_temp_profile
+        _, path = _write_temp_profile(profile)
+        try:
+            transported = json.loads(path.read_text(encoding="utf-8"))["profile"]
+        finally:
+            path.unlink()
+        clean = copy.deepcopy(profile)
+        for part in clean["chars"]["리타"]["equipment"].values():
+            part.pop("_track", None)
+        self.assertEqual(transported, clean)
+        self.assertEqual(profile, original)
+        client = TestClient(app)
+        payload = {"squad": "리타", "duration": 1, "expected": True}
+        legacy = client.post("/simulate", json={**payload, "profile_data": profile})
+        canonical = client.post("/simulate", json={**payload, "profile_data": clean})
+        self.assertEqual(legacy.status_code, 200, legacy.text)
+        self.assertEqual(canonical.status_code, 200, canonical.text)
+        self.assertEqual(legacy.json()["output"], canonical.json()["output"])
+
+    def test_other_unknown_gear_fields_are_still_rejected(self):
+        response = TestClient(app).post("/simulate", json={"squad": "리타", "duration": 1,
+            "profile_data": {"chars": {"리타": {"equipment": {
+                "머리": {"level": 5, "_track": "오버로드", "unknown_field": 1}}}}}})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("unknown_field", response.text)
+
     def test_webapp_shaped_growth_profile_still_simulates(self):
         response = TestClient(app).post("/simulate", json={
             "squad": "리타", "duration": 1, "expected": True, "profile_level": "sync",
