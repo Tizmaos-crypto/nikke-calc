@@ -9,6 +9,10 @@ directory. Abrupt process/host termination can leave OS temp files behind.
 Legacy web/collector gear `_track` display labels are removed from a copy before
 validation. All calculation fields and validation of other unknown keys remain
 unchanged; the submitted profile is not mutated.
+Whole-roster profiles are projected onto the exact selected squad before runner
+validation, preserving account settings and selected growth entries. Unselected
+entries cannot affect a calculation. Unsupported selected squad names and invalid
+selected growth data still fail validation; no character is guessed or substituted.
 
 `RequestLimits` caps `/simulate` and `/dildoro/boss` together at two active
 requests and 120 accepted starts per rolling minute per API process. It rejects

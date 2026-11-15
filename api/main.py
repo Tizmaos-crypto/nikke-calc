@@ -230,12 +230,19 @@ def _build_cmd(req: SimRequest, profile_name_override: Optional[str] = None) -> 
     return cmd
 
 
-def _write_temp_profile(profile_data: dict) -> tuple[str, Path]:
+def _write_temp_profile(profile_data: dict, squad: Optional[str] = None) -> tuple[str, Path]:
     """Transport an inline profile in a private OS temp file, never profiles/."""
     # Older web/collector clients attach a display-only gear label. The calculator
     # never consumes it; remove only this known label before strict validation.
     profile_data = copy.deepcopy(profile_data)
     chars = profile_data.get("chars")
+    # Web/collector clients send the entire owned roster. Only the selected
+    # squad contributes to this calculation. Keep its entries exactly as sent;
+    # unsupported selected names must still fail in runner.request validation.
+    if isinstance(chars, dict) and squad is not None:
+        selected = {name.strip() for name in squad.split(",") if name.strip()}
+        chars = {name: entry for name, entry in chars.items() if name in selected}
+        profile_data["chars"] = chars
     if isinstance(chars, dict):
         for entry in chars.values():
             gear = entry.get("equipment") if isinstance(entry, dict) else None
@@ -320,7 +327,7 @@ def simulate_endpoint(req: SimRequest) -> SimResponse:
     temp_profile_path: Optional[Path] = None
     if req.profile_data is not None:
         try:
-            temp_profile_name, temp_profile_path = _write_temp_profile(req.profile_data)
+            temp_profile_name, temp_profile_path = _write_temp_profile(req.profile_data, req.squad)
         except Exception:
             raise HTTPException(500, "프로필 요청 준비 실패") from None
 

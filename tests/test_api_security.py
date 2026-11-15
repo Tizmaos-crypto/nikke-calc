@@ -18,6 +18,37 @@ except ImportError:
 
 @unittest.skipIf(TestClient is None, "Optional API dependencies are not installed")
 class ApiSecurity(unittest.TestCase):
+    def test_full_roster_does_not_block_selected_squad_or_change_growth(self):
+        profile = {"base": "default", "_account": {"synchro_level": 400},
+                   "_meta": {"name": "synthetic-roster"}, "chars": {
+                       "리타": {"skill_levels": {"1": 7, "2": 8, "3": 9},
+                                "equipment": {"머리": {"level": 4, "_track": "오버로드"}}},
+                       "unsupported-test-roster-entry": {"invalid_unselected_field": True},
+                       "크라운": {"invalid_unselected_field": True}}}
+        before = copy.deepcopy(profile)
+        from api.main import _write_temp_profile
+        _, path = _write_temp_profile(profile, " 리타 ")
+        try:
+            transported = json.loads(path.read_text(encoding="utf-8"))["profile"]
+        finally:
+            path.unlink()
+        self.assertEqual(set(transported["chars"]), {"리타"})
+        self.assertEqual(transported["_account"], profile["_account"])
+        self.assertEqual(transported["chars"]["리타"]["skill_levels"], profile["chars"]["리타"]["skill_levels"])
+        self.assertEqual(profile, before)
+        client = TestClient(app)
+        payload = {"squad": "리타", "duration": 1, "expected": True, "profile_level": "sync"}
+        full = client.post("/simulate", json={**payload, "profile_data": profile})
+        minimal = client.post("/simulate", json={**payload, "profile_data": transported})
+        self.assertEqual(full.status_code, 200, full.text)
+        self.assertEqual(minimal.status_code, 200, minimal.text)
+        self.assertEqual(full.json()["output"], minimal.json()["output"])
+
+    def test_unsupported_selected_character_is_not_silently_dropped(self):
+        response = TestClient(app).post("/simulate", json={"squad": "unsupported-test-roster-entry", "duration": 1,
+            "profile_data": {"chars": {"unsupported-test-roster-entry": {}}}})
+        self.assertEqual(response.status_code, 400)
+
     def test_legacy_gear_labels_preserve_all_stats_and_calculation(self):
         equipment = {
             "머리": {"level": 5, "_track": "오버로드"},
