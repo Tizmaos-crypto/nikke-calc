@@ -1,11 +1,9 @@
 # 원작자 저장소(Jgaram/nikke-calc)의 master 브랜치를 매일 자동으로 fork로 병합.
-# 충돌이 발생하면 워크플로 실패 → GitHub이 이메일 알림. 커밋이 있으면 push되고, Render가 자동 재배포.
+# 병합 후 검증을 통과한 경우에만 push한다. 충돌/검증 실패는 GitHub 알림으로 확인한다.
 #
 # 브랜치: fork도 upstream도 master 사용 (v0.2 fix — 이전 v0.1은 main으로 잘못 지정되어 있었음)
 #
-# 필요 설정:
-#   Settings → Actions → General → Workflow permissions → "Read and write permissions" 체크
-#   (또는 SYNC_TOKEN 시크릿에 PAT 등록 · 두 방법 중 하나면 됨)
+# 별도 PAT 없이 작업별 GITHUB_TOKEN을 사용한다. 오래된 SYNC_TOKEN은 참조하지 않는다.
 
 name: Sync from Jgaram/nikke-calc
 
@@ -14,9 +12,14 @@ on:
     - cron: "0 3 * * *"  # 매일 KST 12:00 (UTC 03:00)
   workflow_dispatch:  # 대시보드에서 수동 실행도 가능
 
+concurrency:
+  group: sync-upstream-master
+  cancel-in-progress: false
+
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
     steps:
@@ -24,7 +27,7 @@ jobs:
         with:
           fetch-depth: 0
           ref: master
-          token: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ github.token }}
 
       - name: Add upstream + merge master
         run: |
@@ -33,7 +36,27 @@ jobs:
           git remote add upstream https://github.com/Jgaram/nikke-calc.git
           git fetch upstream master
           git merge upstream/master --no-edit || {
-            echo "::error::충돌 발생 — 수동 병합 필요 (GitHub 웹에서 Sync fork 시도)"
+            echo "::error::병합 실패 — 로컬에서 충돌을 해결하고 검증 후 반영하세요."
             exit 1
           }
+
+      # GITHUB_TOKEN으로 push한 커밋은 별도 push CI를 시작하지 않으므로 여기서 검증한다.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: 문서·데이터 정합
+        run: python -m runner.doclint
+
+      - name: 딜 계산 회귀
+        run: python -m runner.snapshot
+
+      - name: 요청·결과 계약 검증
+        run: |
+          python -m pip install -r requirements.txt httpx==0.28.1
+          python -c "from fastapi.testclient import TestClient; from api.main import app"
+          python -m unittest discover -s tests -v
+
+      - name: 검증된 병합 반영
+        run: |
           git push origin master
